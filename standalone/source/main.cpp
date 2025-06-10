@@ -66,7 +66,7 @@ auto main(int argc, char** argv) -> int {
   }
 
   if (result["server"].as<bool>()) {
-    // Increse stack size
+    // Increase stack size
 
     const rlim_t min_stack_size = 64 * 1024 * 1024;
     struct rlimit rl;
