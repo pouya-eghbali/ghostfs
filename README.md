@@ -1,7 +1,3 @@
-<p align="center">
-  <img height="128px" src="https://ghostfs.io/images/ghostfs.svg" alt="GhostFS">
-</p>
-
 <h1 align="center">GhostFS</h1>
 
 <p align="center">
