@@ -256,17 +256,21 @@ test_symlink() {
     local link="$MOUNT/symlink_link.txt"
 
     echo "symlink target" > "$target"
-    ln -s "$target" "$link"
 
-    if [ -L "$link" ]; then
-        local content=$(cat "$link")
-        if [ "$content" = "symlink target" ]; then
-            log_pass "Symbolic link"
+    # Symlink with timeout (may hang on some FUSE implementations)
+    if timeout 5 ln -s "$target" "$link" 2>/dev/null; then
+        if [ -L "$link" ]; then
+            local content=$(timeout 5 cat "$link" 2>/dev/null)
+            if [ "$content" = "symlink target" ]; then
+                log_pass "Symbolic link"
+            else
+                log_fail "Symbolic link - content mismatch through link"
+            fi
         else
-            log_fail "Symbolic link - content mismatch through link"
+            log_fail "Symbolic link - link not created"
         fi
     else
-        log_fail "Symbolic link - link not created"
+        log_fail "Symbolic link - operation timed out or failed"
     fi
 }
 
