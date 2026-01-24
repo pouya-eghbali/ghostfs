@@ -46,7 +46,7 @@ CPMAddPackage(
 
 CPMAddPackage(
   NAME fmt
-  GIT_TAG 7.1.3
+  GIT_TAG 12.1.0
   GITHUB_REPOSITORY fmtlib/fmt
   OPTIONS "FMT_INSTALL YES" # create an installable target
 )
@@ -144,5 +144,5 @@ packageProject(
   INCLUDE_DESTINATION include/${PROJECT_NAME}-${PROJECT_VERSION}
   VERSION_HEADER "${VERSION_HEADER_LOCATION}"
   COMPATIBILITY SameMajorVersion
-  DEPENDENCIES "fmt 7.1.3 websocketpp 0.8.2"
+  DEPENDENCIES "fmt 12.1.0"
 )
