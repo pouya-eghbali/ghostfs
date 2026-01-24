@@ -1,0 +1,21 @@
+services:
+  ghostfs:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - ./tests:/tests:ro
+    environment:
+      - GHOSTFS_ROOT=/data/root
+      - GHOSTFS_MOUNT=/mnt/ghostfs
+      - GHOSTFS_HOST=127.0.0.1
+      - GHOSTFS_PORT=3444
+      - GHOSTFS_AUTH_PORT=3445
+    command: ["/tests/run-e2e.sh"]
