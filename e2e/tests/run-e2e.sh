@@ -70,7 +70,7 @@ log_info "Server started (PID: $SERVER_PID)"
 
 # Add a token for the test user
 log_info "Adding authentication token..."
-TOKEN=$(ghostfs --authorize --host "$HOST" --auth-port "$AUTH_PORT" --user "$USER" --retries -1 2>&1 | grep -oE '[a-f0-9]{32}' | head -1)
+TOKEN=$(ghostfs --authorize --host "$HOST" --auth-port "$AUTH_PORT" --user "$USER" --retries -1 2>&1 | grep -oE '[a-f0-9]{32,}' | head -1)
 
 if [ -z "$TOKEN" ]; then
     log_fail "Failed to get authentication token"
