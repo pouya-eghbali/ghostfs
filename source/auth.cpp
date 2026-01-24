@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <string>
@@ -29,6 +30,7 @@ std::string add_token(std::string user, std::string token, int64_t retries) {
   std::string token_to_add = token.length() ? token : random_token();
 
   tokens[token_to_add] = {.user = user, .usable = retries};
+  std::cerr << "[AUTH DEBUG] add_token: user=" << user << " token=" << token_to_add << " retries=" << retries << std::endl;
 
   if (not users.contains(user)) {
     users[user] = {.sub_directory = user};
@@ -60,22 +62,28 @@ std::map<std::string, std::string>* get_user_mounts(std::string user) {
 }
 
 bool authenticate(std::string token, std::string user) {
+  std::cerr << "[AUTH DEBUG] authenticate: user=" << user << " token=" << token << " tokens_count=" << tokens.size() << std::endl;
+
   if (not tokens.contains(token)) {
+    std::cerr << "[AUTH DEBUG] Token not found in map" << std::endl;
     return false;
   }
 
   struct Token* t = &tokens[token];
 
   if (t->user != user) {
+    std::cerr << "[AUTH DEBUG] User mismatch: expected=" << t->user << " got=" << user << std::endl;
     return false;
   }
 
   if (t->usable == 0) {
+    std::cerr << "[AUTH DEBUG] Token exhausted" << std::endl;
     return false;
   } else if (t->usable > 0) {  // pass -1 to allow infinite use
     t->usable--;
   }
 
+  std::cerr << "[AUTH DEBUG] Authentication successful" << std::endl;
   return true;
 }
 
