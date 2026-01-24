@@ -383,7 +383,7 @@ public:
     std::string user_root = normalize_path(root, user, suffix);
     std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
-    std::filesystem::path file_path = parent_path / req.getName();
+    std::filesystem::path file_path = parent_path / req.getName().cStr();
 
     bool access_ok = check_access(root, user, suffix, file_path);
 
@@ -459,7 +459,7 @@ public:
     std::string user_root = normalize_path(root, user, suffix);
     std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
-    std::filesystem::path file_path = parent_path / req.getName();
+    std::filesystem::path file_path = parent_path / req.getName().cStr();
 
     bool access_ok = check_access(root, user, suffix, file_path);
 
@@ -1250,7 +1250,7 @@ public:
     std::string user_root = normalize_path(root, user, suffix);
     std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
-    std::filesystem::path file_path = parent_path / req.getName();
+    std::filesystem::path file_path = parent_path / req.getName().cStr();
 
     bool access_ok = check_access(root, user, suffix, file_path);
 

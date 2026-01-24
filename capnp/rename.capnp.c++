@@ -6,22 +6,22 @@
 namespace capnp {
 namespace schemas {
 static const ::capnp::_::AlignedData<79> b_8169ed6dea562276 = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+  {   0,   0,   0,   0,   6,   0,   6,   0,
     118,  34,  86, 234, 109, 237, 105, 129,
-     19,   0,   0,   0,   1,   0,   2,   0,
+     13,   0,   0,   0,   1,   0,   2,   0,
      74, 221, 111,  56,  42, 158,  44, 172,
       2,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0, 210,   0,   0,   0,
-     33,   0,   0,   0,   7,   0,   0,   0,
+     22,   0,   0,   0, 139,   0,   0,   0,
+     21,   0,   0,   0, 162,   0,   0,   0,
+     29,   0,   0,   0,   7,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     29,   0,   0,   0, 231,   0,   0,   0,
+     25,   0,   0,   0, 231,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47, 114, 101,
-    110,  97, 109, 101,  46,  99,  97, 112,
-    110, 112,  58,  82, 101, 110,  97, 109,
-    101,   0,   0,   0,   0,   0,   0,   0,
+    114, 101, 110,  97, 109, 101,  46,  99,
+     97, 112, 110, 112,  58,  82, 101, 110,
+     97, 109, 101,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   1,   0,   1,   0,
      16,   0,   0,   0,   3,   0,   4,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -92,7 +92,7 @@ static const uint16_t m_8169ed6dea562276[] = {1, 3, 2, 0};
 static const uint16_t i_8169ed6dea562276[] = {0, 1, 2, 3};
 const ::capnp::_::RawSchema s_8169ed6dea562276 = {
   0x8169ed6dea562276, b_8169ed6dea562276.words, 79, nullptr, m_8169ed6dea562276,
-  0, 4, i_8169ed6dea562276, nullptr, nullptr, { &s_8169ed6dea562276, nullptr, nullptr, 0, 0, nullptr }
+  0, 4, i_8169ed6dea562276, nullptr, nullptr, { &s_8169ed6dea562276, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
 }  // namespace schemas
@@ -102,11 +102,15 @@ const ::capnp::_::RawSchema s_8169ed6dea562276 = {
 
 
 // Rename
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t Rename::_capnpPrivate::dataWordSize;
 constexpr uint16_t Rename::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind Rename::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* Rename::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 

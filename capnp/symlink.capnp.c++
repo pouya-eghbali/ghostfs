@@ -6,22 +6,22 @@
 namespace capnp {
 namespace schemas {
 static const ::capnp::_::AlignedData<63> b_e82ee018e933124e = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+  {   0,   0,   0,   0,   6,   0,   6,   0,
      78,  18,  51, 233,  24, 224,  46, 232,
-     20,   0,   0,   0,   1,   0,   1,   0,
+     14,   0,   0,   0,   1,   0,   1,   0,
     103,  87,  44, 133, 107, 187, 191, 185,
       2,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0, 226,   0,   0,   0,
-     33,   0,   0,   0,   7,   0,   0,   0,
+     22,   0,   0,   0, 105,   0,   0,   0,
+     21,   0,   0,   0, 178,   0,   0,   0,
+     29,   0,   0,   0,   7,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     29,   0,   0,   0, 175,   0,   0,   0,
+     25,   0,   0,   0, 175,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47, 115, 121,
-    109, 108, 105, 110, 107,  46,  99,  97,
-    112, 110, 112,  58,  83, 121, 109, 108,
-    105, 110, 107,   0,   0,   0,   0,   0,
+    115, 121, 109, 108, 105, 110, 107,  46,
+     99,  97, 112, 110, 112,  58,  83, 121,
+    109, 108, 105, 110, 107,   0,   0,   0,
       0,   0,   0,   0,   1,   0,   1,   0,
      12,   0,   0,   0,   3,   0,   4,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -76,7 +76,7 @@ static const uint16_t m_e82ee018e933124e[] = {0, 2, 1};
 static const uint16_t i_e82ee018e933124e[] = {0, 1, 2};
 const ::capnp::_::RawSchema s_e82ee018e933124e = {
   0xe82ee018e933124e, b_e82ee018e933124e.words, 63, nullptr, m_e82ee018e933124e,
-  0, 3, i_e82ee018e933124e, nullptr, nullptr, { &s_e82ee018e933124e, nullptr, nullptr, 0, 0, nullptr }
+  0, 3, i_e82ee018e933124e, nullptr, nullptr, { &s_e82ee018e933124e, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
 }  // namespace schemas
@@ -86,11 +86,15 @@ const ::capnp::_::RawSchema s_e82ee018e933124e = {
 
 
 // Symlink
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t Symlink::_capnpPrivate::dataWordSize;
 constexpr uint16_t Symlink::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind Symlink::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* Symlink::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 

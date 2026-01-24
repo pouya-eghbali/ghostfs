@@ -6,24 +6,24 @@
 namespace capnp {
 namespace schemas {
 static const ::capnp::_::AlignedData<102> b_82ccc8c4cceb633f = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+  {   0,   0,   0,   0,   6,   0,   6,   0,
      63,  99, 235, 204, 196, 200, 204, 130,
-     28,   0,   0,   0,   1,   0,   2,   0,
+     22,   0,   0,   0,   1,   0,   2,   0,
      55,   2, 217, 103, 135,  74, 250, 132,
       2,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0,  90,   1,   0,   0,
-     41,   0,   0,   0,  39,   0,   0,   0,
+     22,   0,   0,   0, 152,   3,   0,   0,
+     21,   0,   0,   0,  42,   1,   0,   0,
+     37,   0,   0,   0,  39,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     65,   0,   0,   0,  31,   1,   0,   0,
+     61,   0,   0,   0,  31,   1,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47,  99, 114,
-    101,  97, 116, 101,  46, 114, 101, 115,
-    112, 111, 110, 115, 101,  46,  99,  97,
-    112, 110, 112,  58,  67, 114, 101,  97,
-    116, 101,  82, 101, 115, 112, 111, 110,
-    115, 101,   0,   0,   0,   0,   0,   0,
+     99, 114, 101,  97, 116, 101,  46, 114,
+    101, 115, 112, 111, 110, 115, 101,  46,
+     99,  97, 112, 110, 112,  58,  67, 114,
+    101,  97, 116, 101,  82, 101, 115, 112,
+    111, 110, 115, 101,   0,   0,   0,   0,
       8,   0,   0,   0,   1,   0,   1,   0,
     162, 143,  43,  26, 255,   8, 196, 145,
       9,   0,   0,   0, 106,   0,   0,   0,
@@ -119,29 +119,30 @@ static const uint16_t m_82ccc8c4cceb633f[] = {4, 2, 3, 0, 1};
 static const uint16_t i_82ccc8c4cceb633f[] = {0, 1, 2, 3, 4};
 const ::capnp::_::RawSchema s_82ccc8c4cceb633f = {
   0x82ccc8c4cceb633f, b_82ccc8c4cceb633f.words, 102, d_82ccc8c4cceb633f, m_82ccc8c4cceb633f,
-  2, 5, i_82ccc8c4cceb633f, nullptr, nullptr, { &s_82ccc8c4cceb633f, nullptr, nullptr, 0, 0, nullptr }
+  2, 5, i_82ccc8c4cceb633f, nullptr, nullptr, { &s_82ccc8c4cceb633f, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
-static const ::capnp::_::AlignedData<208> b_91c408ff1a2b8fa2 = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+static const ::capnp::_::AlignedData<209> b_91c408ff1a2b8fa2 = {
+  {   0,   0,   0,   0,   6,   0,   6,   0,
     162, 143,  43,  26, 255,   8, 196, 145,
-     43,   0,   0,   0,   1,   0,  12,   0,
+     37,   0,   0,   0,   1,   0,  12,   0,
      63,  99, 235, 204, 196, 200, 204, 130,
       0,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0, 194,   1,   0,   0,
+    154,   0,   0,   0,  38,   2,   0,   0,
+     21,   0,   0,   0, 146,   1,   0,   0,
      45,   0,   0,   0,   7,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
      41,   0,   0,   0, 167,   2,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47,  99, 114,
-    101,  97, 116, 101,  46, 114, 101, 115,
-    112, 111, 110, 115, 101,  46,  99,  97,
-    112, 110, 112,  58,  67, 114, 101,  97,
-    116, 101,  82, 101, 115, 112, 111, 110,
-    115, 101,  46,  70, 117, 115, 101,  70,
-    105, 108, 101,  73, 110, 102, 111,   0,
+     99, 114, 101,  97, 116, 101,  46, 114,
+    101, 115, 112, 111, 110, 115, 101,  46,
+     99,  97, 112, 110, 112,  58,  67, 114,
+    101,  97, 116, 101,  82, 101, 115, 112,
+    111, 110, 115, 101,  46,  70, 117, 115,
+    101,  70, 105, 108, 101,  73, 110, 102,
+    111,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   1,   0,   1,   0,
      48,   0,   0,   0,   3,   0,   4,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -337,29 +338,30 @@ static const ::capnp::_::AlignedData<208> b_91c408ff1a2b8fa2 = {
 static const uint16_t m_91c408ff1a2b8fa2[] = {6, 2, 8, 0, 4, 3, 9, 11, 5, 7, 10, 1};
 static const uint16_t i_91c408ff1a2b8fa2[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
 const ::capnp::_::RawSchema s_91c408ff1a2b8fa2 = {
-  0x91c408ff1a2b8fa2, b_91c408ff1a2b8fa2.words, 208, nullptr, m_91c408ff1a2b8fa2,
-  0, 12, i_91c408ff1a2b8fa2, nullptr, nullptr, { &s_91c408ff1a2b8fa2, nullptr, nullptr, 0, 0, nullptr }
+  0x91c408ff1a2b8fa2, b_91c408ff1a2b8fa2.words, 209, nullptr, m_91c408ff1a2b8fa2,
+  0, 12, i_91c408ff1a2b8fa2, nullptr, nullptr, { &s_91c408ff1a2b8fa2, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
-static const ::capnp::_::AlignedData<217> b_e5dbc07868dca47d = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+static const ::capnp::_::AlignedData<218> b_e5dbc07868dca47d = {
+  {   0,   0,   0,   0,   6,   0,   6,   0,
     125, 164, 220, 104, 120, 192, 219, 229,
-     43,   0,   0,   0,   1,   0,  11,   0,
+     37,   0,   0,   0,   1,   0,  11,   0,
      63,  99, 235, 204, 196, 200, 204, 130,
       0,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0, 130,   1,   0,   0,
+     42,   2,   0,   0, 150,   3,   0,   0,
+     21,   0,   0,   0,  82,   1,   0,   0,
      41,   0,   0,   0,   7,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
      37,   0,   0,   0, 223,   2,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47,  99, 114,
-    101,  97, 116, 101,  46, 114, 101, 115,
-    112, 111, 110, 115, 101,  46,  99,  97,
-    112, 110, 112,  58,  67, 114, 101,  97,
-    116, 101,  82, 101, 115, 112, 111, 110,
-    115, 101,  46,  65, 116, 116, 114,   0,
+     99, 114, 101,  97, 116, 101,  46, 114,
+    101, 115, 112, 111, 110, 115, 101,  46,
+     99,  97, 112, 110, 112,  58,  67, 114,
+    101,  97, 116, 101,  82, 101, 115, 112,
+    111, 110, 115, 101,  46,  65, 116, 116,
+    114,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   1,   0,   1,   0,
      52,   0,   0,   0,   3,   0,   4,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -565,8 +567,8 @@ static const ::capnp::_::AlignedData<217> b_e5dbc07868dca47d = {
 static const uint16_t m_e5dbc07868dca47d[] = {8, 11, 12, 10, 0, 5, 1, 2, 9, 3, 6, 7, 4};
 static const uint16_t i_e5dbc07868dca47d[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 const ::capnp::_::RawSchema s_e5dbc07868dca47d = {
-  0xe5dbc07868dca47d, b_e5dbc07868dca47d.words, 217, nullptr, m_e5dbc07868dca47d,
-  0, 13, i_e5dbc07868dca47d, nullptr, nullptr, { &s_e5dbc07868dca47d, nullptr, nullptr, 0, 0, nullptr }
+  0xe5dbc07868dca47d, b_e5dbc07868dca47d.words, 218, nullptr, m_e5dbc07868dca47d,
+  0, 13, i_e5dbc07868dca47d, nullptr, nullptr, { &s_e5dbc07868dca47d, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
 }  // namespace schemas
@@ -576,27 +578,39 @@ const ::capnp::_::RawSchema s_e5dbc07868dca47d = {
 
 
 // CreateResponse
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t CreateResponse::_capnpPrivate::dataWordSize;
 constexpr uint16_t CreateResponse::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind CreateResponse::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* CreateResponse::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 // CreateResponse::FuseFileInfo
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t CreateResponse::FuseFileInfo::_capnpPrivate::dataWordSize;
 constexpr uint16_t CreateResponse::FuseFileInfo::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind CreateResponse::FuseFileInfo::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* CreateResponse::FuseFileInfo::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 // CreateResponse::Attr
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t CreateResponse::Attr::_capnpPrivate::dataWordSize;
 constexpr uint16_t CreateResponse::Attr::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind CreateResponse::Attr::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* CreateResponse::Attr::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 
