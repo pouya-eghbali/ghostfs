@@ -332,7 +332,8 @@ test_overwrite_file() {
     fi
 }
 
-# Run all tests
+# Run all tests (disable set -e so test failures don't abort)
+set +e
 test_create_file
 test_read_file
 test_write_append
@@ -348,6 +349,7 @@ test_nested_directories
 test_file_stat
 test_concurrent_writes
 test_overwrite_file
+set -e
 
 # ============================================================================
 # Summary
