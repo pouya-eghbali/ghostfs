@@ -102,6 +102,7 @@ ghostfs/
 ├── capnp/               # Protocol definitions (41 files)
 ├── standalone/          # CLI executable
 ├── test/                # Unit tests (doctest)
+├── e2e/                 # E2E tests (Docker)
 ├── cmake/               # CMake utilities
 └── documentation/       # Doxygen/Sphinx docs
 ```
@@ -148,14 +149,32 @@ ghostfs/
 
 ## Testing
 
+### Unit Tests
+
 ```bash
-# Build and run tests
+# Build and run unit tests
 cmake -S test -B build/test
 cmake --build build/test
 ctest --test-dir build/test
 ```
 
-Tests use doctest framework. Test files are in `test/source/`.
+Unit tests use doctest framework. Test files are in `test/source/`.
+
+### E2E Tests (Docker)
+
+```bash
+# Run full e2e test suite
+cd e2e
+docker compose up --build --exit-code-from ghostfs
+```
+
+E2E tests run in Docker with a real FUSE mount. They cover:
+- File operations (create, read, write, delete, rename)
+- Directory operations (mkdir, rmdir, list, nested)
+- Permissions and symlinks
+- Large files and concurrent writes
+
+See `e2e/tests/run-e2e.sh` for test implementations.
 
 ## Common Tasks
 

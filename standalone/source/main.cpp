@@ -40,17 +40,12 @@ auto main(int argc, char** argv) -> int {
     ("M,mounts", "Get all soft mounts for user")
     ("U,unmount", "Soft unmount a directory")
     ("s,server", "Run in server mode")
-    ("c,client", "Run in client mode");
-
-  // options.add_options()
-  //   ("h,help", "Show help")
-  //   ("v,version", "Print the current version number")
-  //   ("n,name", "Name to greet", cxxopts::value(name)->default_value("World"))
-  //   ("l,lang", "Language code to use", cxxopts::value(language)->default_value("en"))
-  // ;
+    ("c,client", "Run in client mode")
+    ("mountpoint", "Mount point for client mode", cxxopts::value<std::string>()->default_value(""));
 
   // clang-format on
 
+  options.parse_positional({"mountpoint"});
   auto result = options.parse(argc, argv);
 
   // std::cout << "UUID: " << gen_uuid() << std::endl;
@@ -95,12 +90,22 @@ auto main(int argc, char** argv) -> int {
     std::string user = result["user"].as<std::string>();
     std::string token = result["token"].as<std::string>();
     std::string cert = result["cert"].as<std::string>();
-    std::vector<std::string> options = result["options"].as<std::vector<std::string>>();
+    std::string mountpoint = result["mountpoint"].as<std::string>();
+    std::vector<std::string> fuse_options;
+    if (result.count("options")) {
+      fuse_options = result["options"].as<std::vector<std::string>>();
+    }
     int64_t write_back = result["write-back"].as<uint8_t>();
     int64_t read_ahead = result["read-ahead"].as<uint8_t>();
 
-    return start_fs(argv[0], argv[1], options, host, port, user, token, write_back, read_ahead,
-                    cert);
+    if (mountpoint.empty()) {
+      std::cerr << "Error: mountpoint is required for client mode" << std::endl;
+      return 1;
+    }
+
+    char* mountpoint_arg = const_cast<char*>(mountpoint.c_str());
+    return start_fs(argv[0], mountpoint_arg, fuse_options, host, port, user, token, write_back,
+                    read_ahead, cert);
 
   } else if (result["authorize"].as<bool>()) {
     uint16_t port = result["auth-port"].as<uint16_t>();
