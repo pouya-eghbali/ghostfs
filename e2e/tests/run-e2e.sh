@@ -257,8 +257,9 @@ test_symlink() {
 
     echo "symlink target" > "$target"
 
+    # Use relative symlink to avoid FUSE re-entry issues with absolute paths
     # Symlink with timeout (may hang on some FUSE implementations)
-    if timeout 5 ln -s "$target" "$link" 2>/dev/null; then
+    if timeout 5 ln -s "symlink_target.txt" "$link" 2>/dev/null; then
         if [ -L "$link" ]; then
             local content=$(timeout 5 cat "$link" 2>/dev/null)
             if [ "$content" = "symlink target" ]; then
@@ -352,7 +353,7 @@ test_delete_directory
 test_rename_file
 test_file_permissions
 test_large_file
-# test_symlink  # TODO: investigate hang
+test_symlink
 test_nested_directories
 test_file_stat
 test_concurrent_writes
