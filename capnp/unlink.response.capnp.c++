@@ -6,24 +6,24 @@
 namespace capnp {
 namespace schemas {
 static const ::capnp::_::AlignedData<65> b_cf560b3d781dc555 = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+  {   0,   0,   0,   0,   6,   0,   6,   0,
      85, 197,  29, 120,  61,  11,  86, 207,
-     28,   0,   0,   0,   1,   0,   2,   0,
+     22,   0,   0,   0,   1,   0,   2,   0,
      16, 120,  13, 186,  21, 227, 159, 188,
       0,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0,  90,   1,   0,   0,
-     41,   0,   0,   0,   7,   0,   0,   0,
+     22,   0,   0,   0, 106,   0,   0,   0,
+     21,   0,   0,   0,  42,   1,   0,   0,
+     37,   0,   0,   0,   7,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     37,   0,   0,   0, 175,   0,   0,   0,
+     33,   0,   0,   0, 175,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47, 117, 110,
-    108, 105, 110, 107,  46, 114, 101, 115,
-    112, 111, 110, 115, 101,  46,  99,  97,
-    112, 110, 112,  58,  85, 110, 108, 105,
-    110, 107,  82, 101, 115, 112, 111, 110,
-    115, 101,   0,   0,   0,   0,   0,   0,
+    117, 110, 108, 105, 110, 107,  46, 114,
+    101, 115, 112, 111, 110, 115, 101,  46,
+     99,  97, 112, 110, 112,  58,  85, 110,
+    108, 105, 110, 107,  82, 101, 115, 112,
+    111, 110, 115, 101,   0,   0,   0,   0,
       0,   0,   0,   0,   1,   0,   1,   0,
      12,   0,   0,   0,   3,   0,   4,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -78,7 +78,7 @@ static const uint16_t m_cf560b3d781dc555[] = {2, 0, 1};
 static const uint16_t i_cf560b3d781dc555[] = {0, 1, 2};
 const ::capnp::_::RawSchema s_cf560b3d781dc555 = {
   0xcf560b3d781dc555, b_cf560b3d781dc555.words, 65, nullptr, m_cf560b3d781dc555,
-  0, 3, i_cf560b3d781dc555, nullptr, nullptr, { &s_cf560b3d781dc555, nullptr, nullptr, 0, 0, nullptr }
+  0, 3, i_cf560b3d781dc555, nullptr, nullptr, { &s_cf560b3d781dc555, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
 }  // namespace schemas
@@ -88,11 +88,15 @@ const ::capnp::_::RawSchema s_cf560b3d781dc555 = {
 
 
 // UnlinkResponse
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t UnlinkResponse::_capnpPrivate::dataWordSize;
 constexpr uint16_t UnlinkResponse::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind UnlinkResponse::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* UnlinkResponse::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 

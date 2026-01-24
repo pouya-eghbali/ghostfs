@@ -6,22 +6,22 @@
 namespace capnp {
 namespace schemas {
 static const ::capnp::_::AlignedData<48> b_9f635e64d70ff582 = {
-  {   0,   0,   0,   0,   5,   0,   6,   0,
+  {   0,   0,   0,   0,   6,   0,   6,   0,
     130, 245,  15, 215, 100,  94,  99, 159,
-     19,   0,   0,   0,   1,   0,   1,   0,
+     13,   0,   0,   0,   1,   0,   1,   0,
       1, 180, 212,  43, 167,  58, 120, 181,
       1,   0,   7,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     21,   0,   0,   0, 210,   0,   0,   0,
-     33,   0,   0,   0,   7,   0,   0,   0,
+     22,   0,   0,   0,  83,   0,   0,   0,
+     21,   0,   0,   0, 162,   0,   0,   0,
+     29,   0,   0,   0,   7,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     29,   0,   0,   0, 119,   0,   0,   0,
+     25,   0,   0,   0, 119,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
-     99,  97, 112, 110, 112,  47, 117, 110,
-    108, 105, 110, 107,  46,  99,  97, 112,
-    110, 112,  58,  85, 110, 108, 105, 110,
-    107,   0,   0,   0,   0,   0,   0,   0,
+    117, 110, 108, 105, 110, 107,  46,  99,
+     97, 112, 110, 112,  58,  85, 110, 108,
+    105, 110, 107,   0,   0,   0,   0,   0,
       0,   0,   0,   0,   1,   0,   1,   0,
       8,   0,   0,   0,   3,   0,   4,   0,
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -61,7 +61,7 @@ static const uint16_t m_9f635e64d70ff582[] = {1, 0};
 static const uint16_t i_9f635e64d70ff582[] = {0, 1};
 const ::capnp::_::RawSchema s_9f635e64d70ff582 = {
   0x9f635e64d70ff582, b_9f635e64d70ff582.words, 48, nullptr, m_9f635e64d70ff582,
-  0, 2, i_9f635e64d70ff582, nullptr, nullptr, { &s_9f635e64d70ff582, nullptr, nullptr, 0, 0, nullptr }
+  0, 2, i_9f635e64d70ff582, nullptr, nullptr, { &s_9f635e64d70ff582, nullptr, nullptr, 0, 0, nullptr }, false
 };
 #endif  // !CAPNP_LITE
 }  // namespace schemas
@@ -71,11 +71,15 @@ const ::capnp::_::RawSchema s_9f635e64d70ff582 = {
 
 
 // Unlink
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr uint16_t Unlink::_capnpPrivate::dataWordSize;
 constexpr uint16_t Unlink::_capnpPrivate::pointerCount;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #if !CAPNP_LITE
+#if CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr ::capnp::Kind Unlink::_capnpPrivate::kind;
 constexpr ::capnp::_::RawSchema const* Unlink::_capnpPrivate::schema;
+#endif  // !CAPNP_NEED_REDUNDANT_CONSTEXPR_DECL
 #endif  // !CAPNP_LITE
 
 
