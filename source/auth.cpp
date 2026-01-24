@@ -1,5 +1,6 @@
 #include <ghostfs/uuid.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iterator>
 #include <map>

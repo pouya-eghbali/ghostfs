@@ -2,18 +2,21 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:             Timeleap SA
+Licensor:             Pouya Eghbali
 Licensed Work:        GhostFS
-                      The Licensed Work is (c) 2018-2024 Timeleap.
-Additional Use Grant: See licensing terms at https://kenshi.io/ghostfs
+                      The Licensed Work is (c) 2025-2026 Pouya Eghbali.
+Additional Use Grant: Free to use for self-hosted, non-commercial use,
+                      including personal and research purposes. It must not
+                      be offered as a paid service. It must not be provided
+                      as a part of a paid service. For hosted or commercial
+                      usage information, visit ghostfs.io.
 
-Change Date:          Ten years from the date the Licensed Work is
-                      published.
+Change Date:          Ten years from the date of each release or commit.
 
 Change License:       AGPL License, Version 3.0
 
 For information about alternative licensing arrangements for the Software,
-please visit: https://kenshi.io/ghostfs
+please visit: https://ghostfs.io
 
 Notice
 
