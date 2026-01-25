@@ -96,17 +96,65 @@ jobs:
           function Pass($m) { Write-Host "[PASS] $m" -ForegroundColor Green; $script:passed++ }
           function Fail($m) { Write-Host "[FAIL] $m" -ForegroundColor Red; $script:failed++ }
 
-          # Start client (use localhost - WSL 2 forwards ports)
+          # Check that client binary exists
+          if (-not (Test-Path "build/standalone/Release/GhostFS.exe")) {
+            Write-Error "Client binary not found"; exit 1
+          }
+          Write-Host "Client binary found"
+
+          # Check server is reachable
+          Write-Host "Testing server connectivity..."
+          $tcpClient = New-Object System.Net.Sockets.TcpClient
+          try {
+            $tcpClient.Connect("localhost", 3444)
+            Write-Host "Server is reachable on localhost:3444"
+            $tcpClient.Close()
+          } catch {
+            Write-Host "Cannot connect to localhost:3444: $_"
+            # Try WSL IP
+            $wslIp = (wsl hostname -I).Trim().Split()[0]
+            Write-Host "Trying WSL IP: $wslIp"
+            try {
+              $tcpClient.Connect($wslIp, 3444)
+              Write-Host "Server is reachable on ${wslIp}:3444"
+              $tcpClient.Close()
+              $serverHost = $wslIp
+            } catch {
+              Write-Host "Cannot connect to ${wslIp}:3444: $_"
+              Write-Error "Server not reachable"; exit 1
+            }
+          }
+          $serverHost = "localhost"
+
+          # Start client
           Write-Host "Starting Windows client..."
+          $clientArgs = "--client --host $serverHost --port 3444 -u testuser -t $env:TOKEN G:"
+          Write-Host "Client args: $clientArgs"
           $client = Start-Process -FilePath "build/standalone/Release/GhostFS.exe" `
-            -ArgumentList "--client --host localhost --port 3444 -u testuser -t $env:TOKEN G:" `
+            -ArgumentList $clientArgs `
             -PassThru -NoNewWindow -RedirectStandardOutput "client.log" -RedirectStandardError "client-err.log"
 
+          Write-Host "Client PID: $($client.Id)"
           Start-Sleep -Seconds 5
 
+          # Check if client is still running
+          $proc = Get-Process -Id $client.Id -ErrorAction SilentlyContinue
+          if ($proc) {
+            Write-Host "Client process is running"
+          } else {
+            Write-Host "Client process exited"
+            Write-Host "Exit code: $($client.ExitCode)"
+          }
+
+          # Check client logs
+          Write-Host "=== Client stdout ==="
+          Get-Content "client.log" -ErrorAction SilentlyContinue
+          Write-Host "=== Client stderr ==="
+          Get-Content "client-err.log" -ErrorAction SilentlyContinue
+          Write-Host "=== End logs ==="
+
           if (-not (Test-Path "G:\")) {
-            Get-Content "client.log", "client-err.log" -ErrorAction SilentlyContinue
-            Write-Error "Mount failed"; exit 1
+            Write-Error "Mount failed - G: not accessible"; exit 1
           }
           Write-Host "Mounted on G:"
 
