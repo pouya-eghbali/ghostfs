@@ -46,7 +46,27 @@ jobs:
           # Download WinFSP installer (v2.1 - latest stable)
           $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.24312.msi"
           Write-Host "Downloading WinFSP from $winfspUrl"
-          Invoke-WebRequest -Uri $winfspUrl -OutFile winfsp.msi
+
+          # Use curl with retries (more reliable than Invoke-WebRequest for large files)
+          $maxRetries = 3
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "Download attempt $i of $maxRetries..."
+            curl.exe -L -o winfsp.msi --retry 3 --retry-delay 5 $winfspUrl
+            if ($LASTEXITCODE -eq 0 -and (Test-Path winfsp.msi)) {
+              $size = (Get-Item winfsp.msi).Length
+              Write-Host "Downloaded winfsp.msi ($size bytes)"
+              if ($size -gt 1000000) { break }  # MSI should be > 1MB
+            }
+            if ($i -lt $maxRetries) {
+              Write-Host "Download failed, retrying in 10 seconds..."
+              Start-Sleep -Seconds 10
+            }
+          }
+
+          if (-not (Test-Path winfsp.msi) -or (Get-Item winfsp.msi).Length -lt 1000000) {
+            Write-Error "Failed to download WinFSP MSI"
+            exit 1
+          }
 
           # Install WinFSP with Core and Dev components
           Write-Host "Installing WinFSP..."
@@ -151,7 +171,27 @@ jobs:
           # Download WinFSP installer (v2.1 - latest stable)
           $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.24312.msi"
           Write-Host "Downloading WinFSP from $winfspUrl"
-          Invoke-WebRequest -Uri $winfspUrl -OutFile winfsp.msi
+
+          # Use curl with retries (more reliable than Invoke-WebRequest)
+          $maxRetries = 3
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "Download attempt $i of $maxRetries..."
+            curl.exe -L -o winfsp.msi --retry 3 --retry-delay 5 $winfspUrl
+            if ($LASTEXITCODE -eq 0 -and (Test-Path winfsp.msi)) {
+              $size = (Get-Item winfsp.msi).Length
+              Write-Host "Downloaded winfsp.msi ($size bytes)"
+              if ($size -gt 1000000) { break }
+            }
+            if ($i -lt $maxRetries) {
+              Write-Host "Download failed, retrying in 10 seconds..."
+              Start-Sleep -Seconds 10
+            }
+          }
+
+          if (-not (Test-Path winfsp.msi) -or (Get-Item winfsp.msi).Length -lt 1000000) {
+            Write-Error "Failed to download WinFSP MSI"
+            exit 1
+          }
 
           # Install WinFSP Core only (runtime, no dev headers needed)
           Write-Host "Installing WinFSP runtime..."
