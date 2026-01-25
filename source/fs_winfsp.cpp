@@ -497,7 +497,8 @@ static NTSTATUS Open(
   }
 }
 
-static NTSTATUS Close(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext) {
+static VOID Close(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext) {
+  (void)FileSystem;
   GhostFSFileContext *ctx = (GhostFSFileContext *)FileContext;
 
   if (ctx->fh != 0 && !ctx->is_directory) {
@@ -520,7 +521,6 @@ static NTSTATUS Close(FSP_FILE_SYSTEM *FileSystem, PVOID FileContext) {
   }
 
   delete ctx;
-  return STATUS_SUCCESS;
 }
 
 static NTSTATUS Read(
