@@ -1502,7 +1502,7 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
 
   // Verify credentials by doing initial authentication on main thread
   try {
-    auto &rpc = getRpc();
+    (void)getRpc();
     std::cout << "Connected to the GhostFS server." << std::endl;
   } catch (const std::exception& e) {
     std::cout << "Authentication failed: " << e.what() << std::endl;
