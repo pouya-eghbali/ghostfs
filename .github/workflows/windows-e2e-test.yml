@@ -145,9 +145,9 @@ jobs:
           Write-Host "`nRunning file operation tests with --test mode..."
           $pinfo = New-Object System.Diagnostics.ProcessStartInfo
           $pinfo.FileName = "build/standalone/Release/GhostFS.exe"
-          # Create mount directory and use it instead of drive letter
-          New-Item -ItemType Directory -Path "C:\ghostfs-mount" -Force | Out-Null
-          $pinfo.Arguments = "--client --host localhost --port 3444 -u testuser -t $env:TOKEN --test C:\ghostfs-mount"
+          # Use directory mount path - must NOT exist beforehand for WinFSP
+          $mountPath = "C:\ghostfs-mount-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+          $pinfo.Arguments = "--client --host localhost --port 3444 -u testuser -t $env:TOKEN --test $mountPath"
           $pinfo.UseShellExecute = $false
           $pinfo.RedirectStandardOutput = $true
           $pinfo.RedirectStandardError = $true
