@@ -67,13 +67,17 @@
 #include <write.response.capnp.h>
 
 #include <filesystem>
+#include <map>
 #include <set>
+
+// Global file handle sets per user (shared across all connections for same user)
+// This allows multi-threaded FUSE clients to share file handles across connections
+std::map<std::string, std::set<int64_t>> user_fh_sets;
 
 class GhostFSImpl final : public GhostFS::Server {
   std::string user;
   std::string root;
   std::string suffix;
-  std::set<int64_t> fh_set;
 
   std::string get_path_from_ino(uint64_t ino) {
     // ROOT
@@ -194,7 +198,7 @@ public:
 
     int64_t fh = req.getFi().getFh();
 
-    if (fh and not fh_set.contains(fh)) {
+    if (fh and not user_fh_sets[user].contains(fh)) {
       response.setErrno(EACCES);
       response.setRes(-1);
       return kj::READY_NOW;
@@ -410,7 +414,7 @@ public:
       response.setRes(fh);
       return kj::READY_NOW;
     } else {
-      fh_set.insert(fh);
+      user_fh_sets[user].insert(fh);
 
       response.setIno(file_ino);
 
@@ -478,7 +482,7 @@ public:
       return kj::READY_NOW;
     }
     else {
-      fh_set.insert(fh);
+      user_fh_sets[user].insert(fh);
 
       struct stat attr;
       memset(&attr, 0, sizeof(attr));
@@ -613,8 +617,6 @@ public:
       response.setRes(-1);
       return kj::READY_NOW;
     }
-
-    // std::cout << "READLINK name: " << ino_to_path[req.getIno()].c_str() << std::endl;
 
     char buf[PATH_MAX];
 
@@ -845,7 +847,7 @@ public:
       return kj::READY_NOW;
     }
 
-    fh_set.insert(fh);
+    user_fh_sets[user].insert(fh);
 
     OpenResponse::FuseFileInfo::Builder fi_response = response.initFi();
 
@@ -906,7 +908,7 @@ public:
 
     int64_t fh = fi.getFh();
 
-    if (fh and not fh_set.contains(fh)) {
+    if (fh and not user_fh_sets[user].contains(fh)) {
       response.setErrno(EACCES);
       response.setRes(-1);
       return kj::READY_NOW;
@@ -950,7 +952,7 @@ public:
 
     int64_t fh = fi.getFh();
 
-    if (fh and not fh_set.contains(fh)) {
+    if (fh and not user_fh_sets[user].contains(fh)) {
       response.setErrno(EACCES);
       response.setRes(-1);
       return kj::READY_NOW;
@@ -996,7 +998,7 @@ public:
 
       int64_t fh = fi.getFh();
 
-      if (fh and not fh_set.contains(fh)) {
+      if (fh and not user_fh_sets[user].contains(fh)) {
         response[i].setErrno(EACCES);
         response[i].setRes(-1);
         return kj::READY_NOW;
@@ -1025,7 +1027,7 @@ public:
     Release::FuseFileInfo::Reader fi = req.getFi();
     int64_t fh = fi.getFh();
 
-    if (fh and not fh_set.contains(fh)) {
+    if (fh and not user_fh_sets[user].contains(fh)) {
       response.setErrno(EACCES);
       response.setRes(-1);
       return kj::READY_NOW;
@@ -1036,7 +1038,7 @@ public:
     int res = ::close(fh);
     int err = errno;
 
-    fh_set.erase(fh);
+    user_fh_sets[user].erase(fh);
 
     response.setErrno(err);
     response.setRes(res);
@@ -1275,7 +1277,7 @@ public:
       response.setErrno(err);
       return kj::READY_NOW;
     }
-    fh_set.insert(fh);
+    user_fh_sets[user].insert(fh);
 
     struct stat attr;
     memset(&attr, 0, sizeof(attr));
@@ -1343,7 +1345,7 @@ public:
 
     int64_t fh = fi.getFh();
 
-    if (fh and not fh_set.contains(fh)) {
+    if (fh and not user_fh_sets[user].contains(fh)) {
       response.setErrno(EACCES);
       response.setRes(-1);
       return kj::READY_NOW;
@@ -1372,7 +1374,7 @@ public:
     int res;
     int64_t fh = fi.getFh();
 
-    if (fh and not fh_set.contains(fh)) {
+    if (fh and not user_fh_sets[user].contains(fh)) {
       response.setErrno(EACCES);
       response.setRes(-1);
       return kj::READY_NOW;

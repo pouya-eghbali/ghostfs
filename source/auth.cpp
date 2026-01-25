@@ -14,6 +14,7 @@ struct User {
 struct Token {
   std::string user;
   int64_t usable;
+  bool has_active_session;  // Track if user has an active session with this token
 };
 
 std::map<std::string, struct User> users;
@@ -28,7 +29,7 @@ std::string random_token() {
 std::string add_token(std::string user, std::string token, int64_t retries) {
   std::string token_to_add = token.length() ? token : random_token();
 
-  tokens[token_to_add] = {.user = user, .usable = retries};
+  tokens[token_to_add] = {.user = user, .usable = retries, .has_active_session = false};
 
   if (not users.contains(user)) {
     users[user] = {.sub_directory = user};
@@ -72,8 +73,16 @@ bool authenticate(std::string token, std::string user) {
 
   if (t->usable == 0) {
     return false;
-  } else if (t->usable > 0) {  // pass -1 to allow infinite use
-    t->usable--;
+  } else if (t->usable > 0) {
+    // Don't decrement for re-authentication with an active session
+    // This allows multi-threaded FUSE clients to create multiple connections
+    if (!t->has_active_session) {
+      t->usable--;
+      t->has_active_session = true;
+    }
+  } else {
+    // usable == -1 means infinite use
+    t->has_active_session = true;
   }
 
   return true;
@@ -97,8 +106,10 @@ bool is_subpath(const std::filesystem::path& root, const std::filesystem::path& 
 
 bool check_exists(std::filesystem::path path) {
   std::error_code ec;
-  bool ok = std::filesystem::exists(path, ec);
-  return ok;
+  // Use symlink_status to avoid following symlinks, which could cause
+  // re-entry deadlocks if the symlink points back to a FUSE mount
+  auto status = std::filesystem::symlink_status(path, ec);
+  return std::filesystem::exists(status);
 }
 
 bool check_access(std::string root, std::string user_id, std::string suffix, std::string path) {
@@ -121,7 +132,9 @@ bool check_access(std::string root, std::string user_id, std::string suffix, std
 
   for ([[maybe_unused]] auto const& mount : *get_user_mounts(user_id)) {
     std::string source = mount.second;
-    auto const source_can = std::filesystem::canonical(path);
+    // Use lexically_normal instead of canonical to avoid following symlinks,
+    // which could cause re-entry deadlocks
+    auto const source_can = std::filesystem::path(source).lexically_normal();
 
     if (is_subpath(source_can, path_can)) {
       return true;
