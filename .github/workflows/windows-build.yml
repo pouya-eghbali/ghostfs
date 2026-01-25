@@ -43,19 +43,60 @@ jobs:
       - name: Install WinFSP
         shell: powershell
         run: |
-          # Download WinFSP installer
-          Invoke-WebRequest -Uri "https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi" -OutFile winfsp.msi
+          # Download WinFSP installer (v2.1 - latest stable)
+          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.24312.msi"
+          Write-Host "Downloading WinFSP from $winfspUrl"
+          Invoke-WebRequest -Uri $winfspUrl -OutFile winfsp.msi
 
           # Install WinFSP with Core and Dev components
-          Start-Process msiexec.exe -Wait -ArgumentList '/i winfsp.msi /qn ADDLOCAL=Core,Dev'
+          Write-Host "Installing WinFSP..."
+          $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', 'winfsp.msi', '/qn', '/l*v', 'winfsp-install.log', 'ADDLOCAL=Core,Dev'
 
-          # Verify installation
-          if (Test-Path "C:\Program Files (x86)\WinFsp\inc\winfsp\winfsp.h") {
-            Write-Host "WinFSP installed successfully"
-          } else {
-            Write-Error "WinFSP installation failed"
+          Write-Host "MSI exit code: $($process.ExitCode)"
+
+          # Give filesystem time to settle
+          Start-Sleep -Seconds 2
+
+          # Debug: List potential install locations
+          Write-Host "Checking install locations..."
+          $locations = @(
+            "C:\Program Files (x86)\WinFsp",
+            "C:\Program Files\WinFsp",
+            "$env:ProgramFiles\WinFsp",
+            "${env:ProgramFiles(x86)}\WinFsp"
+          )
+
+          foreach ($loc in $locations) {
+            if (Test-Path $loc) {
+              Write-Host "Found WinFSP at: $loc"
+              Get-ChildItem -Path $loc -Recurse -Depth 2 | Select-Object FullName
+            }
+          }
+
+          # Find the actual header file location
+          $headerPaths = @(
+            "C:\Program Files (x86)\WinFsp\inc\winfsp\winfsp.h",
+            "C:\Program Files\WinFsp\inc\winfsp\winfsp.h",
+            "${env:ProgramFiles(x86)}\WinFsp\inc\winfsp\winfsp.h"
+          )
+
+          $found = $false
+          foreach ($path in $headerPaths) {
+            if (Test-Path $path) {
+              Write-Host "WinFSP header found at: $path"
+              $found = $true
+              break
+            }
+          }
+
+          if (-not $found) {
+            Write-Host "=== MSI Install Log ==="
+            Get-Content winfsp-install.log -Tail 50
+            Write-Error "WinFSP installation failed - header not found"
             exit 1
           }
+
+          Write-Host "WinFSP installed successfully"
 
       - name: Setup CMake
         uses: lukka/get-cmake@latest
@@ -107,15 +148,42 @@ jobs:
       - name: Install WinFSP runtime
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi" -OutFile winfsp.msi
-          Start-Process msiexec.exe -Wait -ArgumentList '/i winfsp.msi /qn ADDLOCAL=Core'
+          # Download WinFSP installer (v2.1 - latest stable)
+          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.24312.msi"
+          Write-Host "Downloading WinFSP from $winfspUrl"
+          Invoke-WebRequest -Uri $winfspUrl -OutFile winfsp.msi
 
-          if (Test-Path "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll") {
-            Write-Host "WinFSP runtime installed successfully"
-          } else {
-            Write-Error "WinFSP runtime installation failed"
+          # Install WinFSP Core only (runtime, no dev headers needed)
+          Write-Host "Installing WinFSP runtime..."
+          $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', 'winfsp.msi', '/qn', 'ADDLOCAL=Core'
+          Write-Host "MSI exit code: $($process.ExitCode)"
+
+          Start-Sleep -Seconds 2
+
+          # Check for DLL in possible locations
+          $dllPaths = @(
+            "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll",
+            "C:\Program Files\WinFsp\bin\winfsp-x64.dll",
+            "${env:ProgramFiles(x86)}\WinFsp\bin\winfsp-x64.dll"
+          )
+
+          $found = $false
+          foreach ($path in $dllPaths) {
+            if (Test-Path $path) {
+              Write-Host "WinFSP runtime found at: $path"
+              $found = $true
+              break
+            }
+          }
+
+          if (-not $found) {
+            # List what was installed
+            Get-ChildItem "C:\Program Files*\WinFsp" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+            Write-Error "WinFSP runtime installation failed - DLL not found"
             exit 1
           }
+
+          Write-Host "WinFSP runtime installed successfully"
 
       - name: Setup WSL2 with Ubuntu
         shell: powershell
