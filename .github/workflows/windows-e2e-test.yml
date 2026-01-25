@@ -58,16 +58,16 @@ jobs:
         shell: wsl-bash {0}
         run: |
           cd /mnt/d/a/ghostfs/ghostfs
-          cmake -S standalone -B build/standalone -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/standalone -j$(nproc)
-          test -f build/standalone/GhostFS && echo "Linux server built successfully"
+          cmake -S standalone -B build/linux -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/linux -j$(nproc)
+          test -f build/linux/GhostFS && echo "Linux server built successfully"
 
       - name: Start Linux server
         shell: wsl-bash {0}
         run: |
           mkdir -p /data/root/testuser
           cd /mnt/d/a/ghostfs/ghostfs
-          nohup ./build/standalone/GhostFS --server --root /data/root --bind 0.0.0.0 --port 3444 --auth-port 3445 > /tmp/server.log 2>&1 &
+          nohup ./build/linux/GhostFS --server --root /data/root --bind 0.0.0.0 --port 3444 --auth-port 3445 > /tmp/server.log 2>&1 &
           sleep 3
           pgrep -f "GhostFS.*--server" && echo "Server started" || (cat /tmp/server.log; exit 1)
 
@@ -76,7 +76,7 @@ jobs:
         shell: wsl-bash {0}
         run: |
           cd /mnt/d/a/ghostfs/ghostfs
-          TOKEN=$(./build/standalone/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1 | grep -oE '[a-f0-9]{32,}')
+          TOKEN=$(./build/linux/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1 | grep -oE '[a-f0-9]{32,}')
           echo "TOKEN=$TOKEN" >> $GITHUB_OUTPUT
           echo "Token obtained"
 
