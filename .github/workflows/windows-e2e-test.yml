@@ -42,61 +42,51 @@ jobs:
             -DWINFSP_PATH="C:/Program Files (x86)/WinFsp"
           cmake --build build/standalone --config Release -j %NUMBER_OF_PROCESSORS%
 
-      - name: Setup WSL2 with Ubuntu
-        shell: powershell
-        run: |
-          wsl --install -d Ubuntu-22.04 --no-launch
-          wsl --set-default-version 2
-          ubuntu2204.exe install --root
-          wsl -d Ubuntu-22.04 -- echo "WSL2 Ubuntu ready"
+      - name: Setup WSL with Ubuntu
+        uses: Vampire/setup-wsl@v4
+        with:
+          distribution: Ubuntu-22.04
+          set-as-default: true
 
       - name: Install build dependencies in WSL
-        shell: powershell
+        shell: wsl-bash {0}
         run: |
-          wsl -d Ubuntu-22.04 -- bash -c "apt-get update && apt-get install -y build-essential cmake g++ libfuse-dev libssl-dev zlib1g-dev fuse"
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake g++ libfuse-dev libssl-dev zlib1g-dev fuse
 
       - name: Build Linux server in WSL
-        shell: powershell
+        shell: wsl-bash {0}
         run: |
-          # Copy source to WSL
-          $wslPath = "\\wsl$\Ubuntu-22.04\ghostfs"
-          Copy-Item -Path "." -Destination $wslPath -Recurse -Force
-
-          # Build in WSL
-          wsl -d Ubuntu-22.04 -- bash -c "cd /ghostfs && cmake -S standalone -B build/standalone -DCMAKE_BUILD_TYPE=Release && cmake --build build/standalone -j\$(nproc)"
-
-          # Verify build
-          wsl -d Ubuntu-22.04 -- test -f /ghostfs/build/standalone/GhostFS
-          if ($LASTEXITCODE -ne 0) { Write-Error "Linux build failed"; exit 1 }
-          Write-Host "Linux server built successfully"
+          cd /mnt/d/a/ghostfs/ghostfs
+          cmake -S standalone -B build/standalone -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/standalone -j$(nproc)
+          test -f build/standalone/GhostFS && echo "Linux server built successfully"
 
       - name: Start Linux server
-        shell: powershell
+        shell: wsl-bash {0}
         run: |
-          wsl -d Ubuntu-22.04 -- mkdir -p /data/root/testuser
-          wsl -d Ubuntu-22.04 -- bash -c "nohup /ghostfs/build/standalone/GhostFS --server --root /data/root --bind 0.0.0.0 --port 3444 --auth-port 3445 > /tmp/server.log 2>&1 &"
-          Start-Sleep -Seconds 3
-
-          $pid = wsl -d Ubuntu-22.04 -- pgrep -f "GhostFS.*--server"
-          if ($pid) { Write-Host "Server started (PID: $pid)" }
-          else { wsl -d Ubuntu-22.04 -- cat /tmp/server.log; Write-Error "Server failed"; exit 1 }
+          mkdir -p /data/root/testuser
+          cd /mnt/d/a/ghostfs/ghostfs
+          nohup ./build/standalone/GhostFS --server --root /data/root --bind 0.0.0.0 --port 3444 --auth-port 3445 > /tmp/server.log 2>&1 &
+          sleep 3
+          pgrep -f "GhostFS.*--server" && echo "Server started" || (cat /tmp/server.log; exit 1)
 
       - name: Create test user token
         id: auth
-        shell: powershell
+        shell: wsl-bash {0}
         run: |
-          $output = wsl -d Ubuntu-22.04 -- /ghostfs/build/standalone/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1
-          $token = [regex]::Match($output, '[a-f0-9]{32,}').Value
-          if ($token) { echo "TOKEN=$token" >> $env:GITHUB_OUTPUT; Write-Host "Token obtained" }
-          else { Write-Error "Failed to get token"; exit 1 }
+          cd /mnt/d/a/ghostfs/ghostfs
+          TOKEN=$(./build/standalone/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1 | grep -oE '[a-f0-9]{32,}')
+          echo "TOKEN=$TOKEN" >> $GITHUB_OUTPUT
+          echo "Token obtained"
 
       - name: Get WSL IP
         id: wsl-ip
-        shell: powershell
+        shell: wsl-bash {0}
         run: |
-          $ip = (wsl -d Ubuntu-22.04 -- hostname -I).Trim().Split()[0]
-          echo "WSL_IP=$ip" >> $env:GITHUB_OUTPUT
-          Write-Host "WSL IP: $ip"
+          IP=$(hostname -I | awk '{print $1}')
+          echo "WSL_IP=$IP" >> $GITHUB_OUTPUT
+          echo "WSL IP: $IP"
 
       - name: Run E2E Tests
         shell: powershell
@@ -149,11 +139,11 @@ jobs:
           Write-Host "=== Client logs ==="
           Get-Content "client.log", "client-err.log" -ErrorAction SilentlyContinue
           Write-Host "=== Server logs ==="
-          wsl -d Ubuntu-22.04 -- cat /tmp/server.log 2>$null
+          wsl cat /tmp/server.log 2>$null
 
       - name: Cleanup
         if: always()
         shell: powershell
         run: |
           Get-Process -Name "GhostFS" -ErrorAction SilentlyContinue | Stop-Process -Force
-          wsl -d Ubuntu-22.04 -- pkill -f GhostFS 2>$null
+          wsl pkill -f GhostFS 2>$null
