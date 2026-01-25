@@ -30,6 +30,10 @@
 
 #include <mutex>
 
+// Timeout constants (milliseconds)
+constexpr uint64_t CONNECTION_TIMEOUT_MS = 5000;   // 5 seconds for connection
+constexpr uint64_t RPC_TIMEOUT_MS = 30000;         // 30 seconds for RPC calls
+
 // CAPNPROTO
 
 #include <access.capnp.h>
@@ -126,10 +130,15 @@ struct ThreadLocalRpc {
   std::optional<GhostFS::Client> client;
   bool initialized = false;
 
+  kj::Timer& getTimer() {
+    return ioContext->provider->getTimer();
+  }
+
   void init() {
     if (initialized) return;
 
     ioContext = std::make_unique<kj::AsyncIoContext>(kj::setupAsyncIo());
+    auto& timer = ioContext->provider->getTimer();
 
     if (g_conn_params.cert.length()) {
       kj::TlsContext::Options options;
@@ -138,14 +147,43 @@ struct ThreadLocalRpc {
 
       kj::TlsContext tls(kj::mv(options));
       auto network = tls.wrapNetwork(ioContext->provider->getNetwork());
-      auto address = network->parseAddress(g_conn_params.host, g_conn_params.port)
-                         .wait(ioContext->waitScope);
-      connection = address->connect().wait(ioContext->waitScope);
+
+      // DNS resolution with timeout
+      auto addressPromise = network->parseAddress(g_conn_params.host, g_conn_params.port);
+      auto addressTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
+          .then([]() -> kj::Own<kj::NetworkAddress> {
+            KJ_FAIL_REQUIRE("DNS resolution timed out");
+          });
+      auto address = addressPromise.exclusiveJoin(kj::mv(addressTimeout))
+          .wait(ioContext->waitScope);
+
+      // TCP connection with timeout
+      auto connectPromise = address->connect();
+      auto connectTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
+          .then([]() -> kj::Own<kj::AsyncIoStream> {
+            KJ_FAIL_REQUIRE("Connection timed out");
+          });
+      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout))
+          .wait(ioContext->waitScope);
     } else {
-      auto address = ioContext->provider->getNetwork()
-                         .parseAddress(g_conn_params.host, g_conn_params.port)
-                         .wait(ioContext->waitScope);
-      connection = address->connect().wait(ioContext->waitScope);
+      // DNS resolution with timeout
+      auto addressPromise = ioContext->provider->getNetwork()
+          .parseAddress(g_conn_params.host, g_conn_params.port);
+      auto addressTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
+          .then([]() -> kj::Own<kj::NetworkAddress> {
+            KJ_FAIL_REQUIRE("DNS resolution timed out");
+          });
+      auto address = addressPromise.exclusiveJoin(kj::mv(addressTimeout))
+          .wait(ioContext->waitScope);
+
+      // TCP connection with timeout
+      auto connectPromise = address->connect();
+      auto connectTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
+          .then([]() -> kj::Own<kj::AsyncIoStream> {
+            KJ_FAIL_REQUIRE("Connection timed out");
+          });
+      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout))
+          .wait(ioContext->waitScope);
     }
 
     twoParty = std::make_unique<capnp::TwoPartyClient>(*connection);
@@ -154,7 +192,15 @@ struct ThreadLocalRpc {
     auto request = authClient.authRequest();
     request.setUser(g_conn_params.user);
     request.setToken(g_conn_params.token);
-    auto result = request.send().wait(ioContext->waitScope);
+
+    // Auth RPC with timeout
+    auto authPromise = request.send();
+    auto authTimeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS)
+        .then([]() -> capnp::Response<GhostFSAuth::AuthResults> {
+          KJ_FAIL_REQUIRE("Authentication timed out");
+        });
+    auto result = authPromise.exclusiveJoin(kj::mv(authTimeout))
+        .wait(ioContext->waitScope);
 
     if (!result.getAuthSuccess()) {
       throw std::runtime_error("Thread-local authentication failed");
@@ -171,6 +217,18 @@ thread_local ThreadLocalRpc tl_rpc;
 inline ThreadLocalRpc& getRpc() {
   tl_rpc.init();
   return tl_rpc;
+}
+
+// Helper for RPC calls with timeout - uses template deduction to avoid explicit type annotations
+template<typename Promise>
+auto waitWithTimeout(Promise&& promise, kj::Timer& timer, kj::WaitScope& waitScope)
+    -> decltype(kj::fwd<Promise>(promise).wait(waitScope)) {
+  using ResultType = decltype(kj::fwd<Promise>(promise).wait(waitScope));
+  auto timeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS)
+      .then([]() -> ResultType {
+        KJ_FAIL_REQUIRE("RPC timeout");
+      });
+  return kj::fwd<Promise>(promise).exclusiveJoin(kj::mv(timeout)).wait(waitScope);
 }
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
@@ -293,51 +351,54 @@ void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_ino_t i
  * }
  */
 static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->getattrRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->getattrRequest();
 
-  Getattr::Builder getattr = request.getReq();
-  Getattr::FuseFileInfo::Builder fuseFileInfo = getattr.initFi();
+    Getattr::Builder getattr = request.getReq();
+    Getattr::FuseFileInfo::Builder fuseFileInfo = getattr.initFi();
 
-  getattr.setIno(ino);
+    getattr.setIno(ino);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  struct stat attr;
+    struct stat attr;
 
-  memset(&attr, 0, sizeof(attr));
+    memset(&attr, 0, sizeof(attr));
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    GetattrResponse::Attr::Reader attributes = response.getAttr();
+
+    attr.st_dev = attributes.getStDev();
+    attr.st_ino = attributes.getStIno();
+    attr.st_mode = attributes.getStMode();
+    attr.st_nlink = attributes.getStNlink();
+    attr.st_uid = geteuid();  // attributes.getStUid();
+    attr.st_gid = getegid();  // attributes.getStGid();
+    attr.st_rdev = attributes.getStRdev();
+    attr.st_size = attributes.getStSize();
+    attr.st_atime = attributes.getStAtime();
+    attr.st_mtime = attributes.getStMtime();
+    attr.st_ctime = attributes.getStCtime();
+    attr.st_blksize = attributes.getStBlksize();
+    attr.st_blocks = attributes.getStBlocks();
+
+    fuse_reply_attr(req, &attr, 1.0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "getattr error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  GetattrResponse::Attr::Reader attributes = response.getAttr();
-
-  attr.st_dev = attributes.getStDev();
-  attr.st_ino = attributes.getStIno();
-  attr.st_mode = attributes.getStMode();
-  attr.st_nlink = attributes.getStNlink();
-  attr.st_uid = geteuid();  // attributes.getStUid();
-  attr.st_gid = getegid();  // attributes.getStGid();
-  attr.st_rdev = attributes.getStRdev();
-  attr.st_size = attributes.getStSize();
-  attr.st_atime = attributes.getStAtime();
-  attr.st_mtime = attributes.getStMtime();
-  attr.st_ctime = attributes.getStCtime();
-  attr.st_blksize = attributes.getStBlksize();
-  attr.st_blocks = attributes.getStBlocks();
-
-  fuse_reply_attr(req, &attr, 1.0);
-
-  // std::cout << "ghostfs_ll_getattr executed correctly: " << payload << std::endl;
 }
 
 /**
@@ -348,56 +409,59 @@ static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
  * @param name -> *char
  */
 static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->lookupRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->lookupRequest();
 
-  Lookup::Builder lookup = request.getReq();
+    Lookup::Builder lookup = request.getReq();
 
-  lookup.setParent(parent);
-  lookup.setName(name);
+    lookup.setParent(parent);
+    lookup.setName(name);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  struct stat attr;
+    struct stat attr;
 
-  memset(&attr, 0, sizeof(attr));
+    memset(&attr, 0, sizeof(attr));
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    struct fuse_entry_param e;
+
+    memset(&e, 0, sizeof(e));
+    e.ino = response.getIno();
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+
+    LookupResponse::Attr::Reader attributes = response.getAttr();
+
+    e.attr.st_dev = attributes.getStDev();
+    e.attr.st_ino = attributes.getStIno();
+    e.attr.st_mode = attributes.getStMode();
+    e.attr.st_nlink = attributes.getStNlink();
+    e.attr.st_uid = geteuid();  // attributes.getStUid();
+    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_rdev = attributes.getStRdev();
+    e.attr.st_size = attributes.getStSize();
+    e.attr.st_atime = attributes.getStAtime();
+    e.attr.st_mtime = attributes.getStMtime();
+    e.attr.st_ctime = attributes.getStCtime();
+    e.attr.st_blksize = attributes.getStBlksize();
+    e.attr.st_blocks = attributes.getStBlocks();
+
+    fuse_reply_entry(req, &e);
+  } catch (const kj::Exception& e) {
+    std::cerr << "lookup error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  struct fuse_entry_param e;
-
-  memset(&e, 0, sizeof(e));
-  e.ino = response.getIno();
-  e.attr_timeout = 1.0;
-  e.entry_timeout = 1.0;
-
-  LookupResponse::Attr::Reader attributes = response.getAttr();
-
-  e.attr.st_dev = attributes.getStDev();
-  e.attr.st_ino = attributes.getStIno();
-  e.attr.st_mode = attributes.getStMode();
-  e.attr.st_nlink = attributes.getStNlink();
-  e.attr.st_uid = geteuid();  // attributes.getStUid();
-  e.attr.st_gid = getegid();  // attributes.getStGid();
-  e.attr.st_rdev = attributes.getStRdev();
-  e.attr.st_size = attributes.getStSize();
-  e.attr.st_atime = attributes.getStAtime();
-  e.attr.st_mtime = attributes.getStMtime();
-  e.attr.st_ctime = attributes.getStCtime();
-  e.attr.st_blksize = attributes.getStBlksize();
-  e.attr.st_blocks = attributes.getStBlocks();
-
-  fuse_reply_entry(req, &e);
-
-  // std::cout << "ghostfs_ll_lookup executed correctly" << std::endl;
 }
 
 /**
@@ -424,50 +488,44 @@ static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *nam
  */
 static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                                struct fuse_file_info *fi) {
-  // printf("Called .readdir\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->readdirRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->readdirRequest();
+    Readdir::Builder readdir = request.getReq();
+    Readdir::FuseFileInfo::Builder fuseFileInfo = readdir.initFi();
 
-  Readdir::Builder readdir = request.getReq();
-  Readdir::FuseFileInfo::Builder fuseFileInfo = readdir.initFi();
+    readdir.setIno(ino);
+    readdir.setSize(size);
+    readdir.setOff(off);
 
-  readdir.setIno(ino);
-  readdir.setSize(size);
-  readdir.setOff(off);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  // Don't remove these 3 lines
-  // const auto m = capnp::messageToFlatArray(message);
-  // const auto c = m.asChars();
-  // std::cout << "Size: " << c.size() << std::endl;
+    struct dirbuf b;
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    memset(&b, 0, sizeof(b));
 
-  struct dirbuf b;
+    int res = response.getRes();
 
-  memset(&b, 0, sizeof(b));
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
 
-  int res = response.getRes();
+    for (ReaddirResponse::Entry::Reader entry : response.getEntries()) {
+      dirbuf_add(req, &b, entry.getName().cStr(), entry.getIno());
+    }
 
-  if (res == -1) {
-    // std::cout << "READDIR::ENOENT" << std::endl;
-    fuse_reply_err(req, response.getErrno());
-    return;
+    reply_buf_limited(req, b.p, b.size, off, size);
+  } catch (const kj::Exception& e) {
+    std::cerr << "readdir error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  for (ReaddirResponse::Entry::Reader entry : response.getEntries()) {
-    dirbuf_add(req, &b, entry.getName().cStr(), entry.getIno());
-  }
-
-  reply_buf_limited(req, b.p, b.size, off, size);
-  // free(b.p);
-
-  // std::cout << "ghostfs_ll_readdir executed correctly: " << payload << std::endl;
 }
 
 /**
@@ -491,49 +549,39 @@ static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_
  * }
  */
 static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-  // printf("Called .open\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->openRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->openRequest();
+    Open::Builder open = request.getReq();
+    Open::FuseFileInfo::Builder fuseFileInfo = open.initFi();
 
-  Open::Builder open = request.getReq();
-  Open::FuseFileInfo::Builder fuseFileInfo = open.initFi();
+    open.setIno(ino);
 
-  open.setIno(ino);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
 
-  int res = response.getRes();
+    if (res == -1) {
+      int err = response.getErrno();
+      fuse_reply_err(req, err);
+      return;
+    }
 
-  if (res == -1) {
-    int err = response.getErrno();
-    fuse_reply_err(req, err);
-    return;
+    OpenResponse::FuseFileInfo::Reader fi_response = response.getFi();
+
+    fi->fh = fi_response.getFh();
+
+    fuse_reply_open(req, fi);
+  } catch (const kj::Exception& e) {
+    std::cerr << "open error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  OpenResponse::FuseFileInfo::Reader fi_response = response.getFi();
-
-  // fi.cache_readdir = fi_response.getCacheReaddir();
-  // fi.direct_io = fi_response.getDirectIo();
-  fi->fh = fi_response.getFh();
-  // fi.flags = fi_response.getFlags();
-  //  fi.flush = fi_response.getFlush();
-  // fi.keep_cache = fi_response.getKeepCache();
-  // fi.lock_owner = fi_response.getLockOwner();
-  //  fi.noflush = fi_response.getNoflush();
-  // fi.nonseekable = fi_response.getNonseekable();
-  // fi.padding = fi_response.getPadding();
-  //  fi.poll_events = fi_response.getPollEvents();
-  // fi.writepage = fi_response.getWritepage();
-
-  fuse_reply_open(req, fi);
-
-  // std::cout << "ghostfs_ll_open executed correctly: " << payload << std::endl;
 }
 
 bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
@@ -561,55 +609,57 @@ bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
 }
 
 void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->readRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->readRequest();
 
-  Read::Builder read = request.getReq();
-  Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
+    Read::Builder read = request.getReq();
+    Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
 
-  // Cap the read-ahead size to prevent memory explosion
-  size_t read_ahead_size = size * max_read_ahead_cache;
-  if (read_ahead_size > MAX_READ_AHEAD_BYTES) {
-    read_ahead_size = MAX_READ_AHEAD_BYTES;
-  }
-
-  read.setIno(ino);
-  read.setSize(read_ahead_size);
-  read.setOff(off);
-
-  fillFileInfo(&fuseFileInfo, fi);
-
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
-
-  int res = response.getRes();
-
-  if (res == -1) {
-    // std::cout << "READ::ENOENT" << std::endl;
-    fuse_reply_err(req, response.getErrno());
-    return;
-  }
-
-  capnp::Data::Reader buf_reader = response.getBuf();
-  const auto chars = buf_reader.asChars();
-  const char *buf = chars.begin();
-
-  // reply_buf_limited(request.req, buf, chars.size(), request.off, request.size);
-
-  fuse_reply_buf(req, buf, min(size, static_cast<size_t>(res)));
-
-  if (static_cast<size_t>(res) > size) {
-    std::lock_guard<std::mutex> lock(read_cache_mutex);
-
-    if (read_ahead_cache.contains(fi->fh)) {
-      free(read_ahead_cache[fi->fh].buf);
+    // Cap the read-ahead size to prevent memory explosion
+    size_t read_ahead_size = size * max_read_ahead_cache;
+    if (read_ahead_size > MAX_READ_AHEAD_BYTES) {
+      read_ahead_size = MAX_READ_AHEAD_BYTES;
     }
 
-    cached_read cache = {ino, (char *)malloc(res), static_cast<size_t>(res), off, fi};
-    memcpy(cache.buf, buf, res);
-    read_ahead_cache[fi->fh] = cache;
+    read.setIno(ino);
+    read.setSize(read_ahead_size);
+    read.setOff(off);
+
+    fillFileInfo(&fuseFileInfo, fi);
+
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
+
+    int res = response.getRes();
+
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    capnp::Data::Reader buf_reader = response.getBuf();
+    const auto chars = buf_reader.asChars();
+    const char *buf = chars.begin();
+
+    fuse_reply_buf(req, buf, min(size, static_cast<size_t>(res)));
+
+    if (static_cast<size_t>(res) > size) {
+      std::lock_guard<std::mutex> lock(read_cache_mutex);
+
+      if (read_ahead_cache.contains(fi->fh)) {
+        free(read_ahead_cache[fi->fh].buf);
+      }
+
+      cached_read cache = {ino, (char *)malloc(res), static_cast<size_t>(res), off, fi};
+      memcpy(cache.buf, buf, res);
+      read_ahead_cache[fi->fh] = cache;
+    }
+  } catch (const kj::Exception& e) {
+    std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
 }
 
@@ -637,8 +687,6 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
  */
 static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                             struct fuse_file_info *fi) {
-  // printf("Called .read\n");
-
   if (max_read_ahead_cache > 0) {
     bool is_cached = reply_from_cache(req, fi->fh, size, off);
 
@@ -649,40 +697,40 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
     return;
   }
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->readRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->readRequest();
 
-  Read::Builder read = request.getReq();
-  Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
+    Read::Builder read = request.getReq();
+    Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
 
-  read.setIno(ino);
-  read.setSize(size);
-  read.setOff(off);
+    read.setIno(ino);
+    read.setSize(size);
+    read.setOff(off);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    // std::cout << "READ::ENOENT" << std::endl;
-    fuse_reply_err(req, response.getErrno());
-    return;
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    capnp::Data::Reader buf_reader = response.getBuf();
+    const auto chars = buf_reader.asChars();
+    const char *buf = chars.begin();
+
+    fuse_reply_buf(req, buf, res);
+  } catch (const kj::Exception& e) {
+    std::cerr << "read error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  capnp::Data::Reader buf_reader = response.getBuf();
-  const auto chars = buf_reader.asChars();
-  const char *buf = chars.begin();
-
-  // reply_buf_limited(request.req, buf, chars.size(), request.off, request.size);
-
-  fuse_reply_buf(req, buf, res);
-
-  // std::cout << "ghostfs_ll_read executed correctly: " << payload << std::endl;
 }
 
 uint64_t add_to_write_back_cache(cached_write cache) {
@@ -717,40 +765,47 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
 
   uint64_t cached = entries_to_flush.size();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->bulkWriteRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->bulkWriteRequest();
 
-  capnp::List<Write>::Builder write = request.initReq(cached);
+    capnp::List<Write>::Builder write = request.initReq(cached);
 
-  uint8_t i = 0;
-  for (auto &cache : entries_to_flush) {
-    write[i].setIno(cache.ino);
-    write[i].setOff(cache.off);
-    write[i].setSize(cache.size);
+    uint8_t i = 0;
+    for (auto &cache : entries_to_flush) {
+      write[i].setIno(cache.ino);
+      write[i].setOff(cache.off);
+      write[i].setSize(cache.size);
 
-    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)cache.buf, cache.size);
-    capnp::Data::Reader buf_reader(buf_ptr);
-    write[i].setBuf(buf_reader);
+      kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)cache.buf, cache.size);
+      capnp::Data::Reader buf_reader(buf_ptr);
+      write[i].setBuf(buf_reader);
 
-    Write::FuseFileInfo::Builder fuseFileInfo = write[i].initFi();
-    fillFileInfo(&fuseFileInfo, cache.fi);
+      Write::FuseFileInfo::Builder fuseFileInfo = write[i].initFi();
+      fillFileInfo(&fuseFileInfo, cache.fi);
 
-    i++;
-  }
+      i++;
+    }
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
 
-  if (reply) {
-    auto response = result.getRes();
-    int res = response[cached - 1].getRes();
-    auto req = entries_to_flush[cached - 1].req;
+    if (reply) {
+      auto response = result.getRes();
+      int res = response[cached - 1].getRes();
+      auto req = entries_to_flush[cached - 1].req;
 
-    if (res == -1) {
-      fuse_reply_err(req, response[cached - 1].getErrno());
-    } else {
-      fuse_reply_write(req, response[cached - 1].getWritten());
+      if (res == -1) {
+        fuse_reply_err(req, response[cached - 1].getErrno());
+      } else {
+        fuse_reply_write(req, response[cached - 1].getWritten());
+      }
+    }
+  } catch (const kj::Exception& e) {
+    std::cerr << "flush_write_back_cache error: " << e.getDescription().cStr() << std::endl;
+    if (reply && cached > 0) {
+      fuse_reply_err(entries_to_flush[cached - 1].req, ETIMEDOUT);
     }
   }
 
@@ -784,8 +839,6 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
  */
 static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size,
                              off_t off, struct fuse_file_info *fi) {
-  // printf("Called .write\n");
-
   if (max_read_ahead_cache > 0) {
     std::lock_guard<std::mutex> lock(read_cache_mutex);
     if (read_ahead_cache.contains(fi->fh)) {
@@ -808,112 +861,180 @@ static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, si
     return;
   }
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->writeRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->writeRequest();
 
-  Write::Builder write = request.getReq();
-  Write::FuseFileInfo::Builder fuseFileInfo = write.initFi();
+    Write::Builder write = request.getReq();
+    Write::FuseFileInfo::Builder fuseFileInfo = write.initFi();
 
-  kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)buf, size);
-  capnp::Data::Reader buf_reader(buf_ptr);
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)buf, size);
+    capnp::Data::Reader buf_reader(buf_ptr);
 
-  write.setIno(ino);
-  write.setBuf(buf_reader);
-  write.setSize(size);
-  write.setOff(off);
+    write.setIno(ino);
+    write.setBuf(buf_reader);
+    write.setSize(size);
+    write.setOff(off);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    // std::cout << "WRITE::ENOENT" << std::endl;
-    fuse_reply_err(req, response.getErrno());
-    return;
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    fuse_reply_write(req, response.getWritten());
+  } catch (const kj::Exception& e) {
+    std::cerr << "write error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  fuse_reply_write(req, response.getWritten());
-
-  // std::cout << "ghostfs_ll_write executed correctly: " << payload << std::endl;
 }
 
 static void ghostfs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
-  // printf("Called .unlink\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->unlinkRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->unlinkRequest();
+    Unlink::Builder unlink = request.getReq();
 
-  Unlink::Builder unlink = request.getReq();
+    unlink.setParent(parent);
+    unlink.setName(name);
 
-  unlink.setParent(parent);
-  unlink.setName(name);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
+    int err = response.getErrno();
 
-  int res = response.getRes();
-  int err = response.getErrno();
-
-  fuse_reply_err(req, res == -1 ? err : 0);
-
-  // std::cout << "unlink executed correctly: " << payload << std::endl;
+    fuse_reply_err(req, res == -1 ? err : 0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "unlink error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 static void ghostfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
-  // printf("Called .rmdir\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->rmdirRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->rmdirRequest();
+    Rmdir::Builder rmdir = request.getReq();
 
-  Rmdir::Builder rmdir = request.getReq();
+    rmdir.setParent(parent);
+    rmdir.setName(name);
 
-  rmdir.setParent(parent);
-  rmdir.setName(name);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
+    int err = response.getErrno();
 
-  int res = response.getRes();
-  int err = response.getErrno();
-
-  fuse_reply_err(req, res == -1 ? err : 0);
-
-  // std::cout << "rmdir executed correctly: " << payload << std::endl;
+    fuse_reply_err(req, res == -1 ? err : 0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "rmdir error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 static void ghostfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
                                const char *name) {
-  // printf("Called .symlink\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->symlinkRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->symlinkRequest();
+    Symlink::Builder symlink = request.getReq();
 
-  Symlink::Builder symlink = request.getReq();
+    symlink.setLink(link);
+    symlink.setParent(parent);
+    symlink.setName(name);
 
-  symlink.setLink(link);
-  symlink.setParent(parent);
-  symlink.setName(name);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
 
-  int res = response.getRes();
+    if (res == -1) {
+      int err = response.getErrno();
+      fuse_reply_err(req, err);
+    } else {
+      struct fuse_entry_param e;
 
-  if (res == -1) {
-    int err = response.getErrno();
-    fuse_reply_err(req, err);
-  } else {
+      memset(&e, 0, sizeof(e));
+      e.ino = response.getIno();
+      e.attr_timeout = 1.0;
+      e.entry_timeout = 1.0;
+
+      SymlinkResponse::Attr::Reader attributes = response.getAttr();
+
+      e.attr.st_dev = attributes.getStDev();
+      e.attr.st_ino = attributes.getStIno();
+      e.attr.st_mode = attributes.getStMode();
+      e.attr.st_nlink = attributes.getStNlink();
+      e.attr.st_uid = geteuid();  // attributes.getStUid();
+      e.attr.st_gid = getegid();  // attributes.getStGid();
+      e.attr.st_rdev = attributes.getStRdev();
+      e.attr.st_size = attributes.getStSize();
+      e.attr.st_atime = attributes.getStAtime();
+      e.attr.st_mtime = attributes.getStMtime();
+      e.attr.st_ctime = attributes.getStCtime();
+      e.attr.st_blksize = attributes.getStBlksize();
+      e.attr.st_blocks = attributes.getStBlocks();
+
+      fuse_reply_entry(req, &e);
+    }
+  } catch (const kj::Exception& e) {
+    std::cerr << "symlink error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
+}
+
+/**
+ * @brief
+ *
+ * @param req
+ * @param parent -> uint64_t
+ * @param name -> *char
+ * @param mode -> uint64_t
+ * @param rdev -> uint16_t
+ */
+static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
+                             dev_t rdev) {
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->mknodRequest();
+
+    Mknod::Builder mknod = request.getReq();
+
+    mknod.setParent(parent);
+    mknod.setName(name);
+    mknod.setMode(mode);
+    mknod.setRdev(rdev);
+
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
+
+    int res = response.getRes();
+
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
     struct fuse_entry_param e;
 
     memset(&e, 0, sizeof(e));
@@ -921,7 +1042,7 @@ static void ghostfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
     e.attr_timeout = 1.0;
     e.entry_timeout = 1.0;
 
-    SymlinkResponse::Attr::Reader attributes = response.getAttr();
+    MknodResponse::Attr::Reader attributes = response.getAttr();
 
     e.attr.st_dev = attributes.getStDev();
     e.attr.st_ino = attributes.getStIno();
@@ -938,72 +1059,10 @@ static void ghostfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
     e.attr.st_blocks = attributes.getStBlocks();
 
     fuse_reply_entry(req, &e);
+  } catch (const kj::Exception& e) {
+    std::cerr << "mknod error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  // std::cout << "symlink executed correctly: " << payload << std::endl;
-}
-
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- * @param rdev -> uint16_t
- */
-static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
-                             dev_t rdev) {
-  // printf("Called .mknod\n");
-
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->mknodRequest();
-
-  Mknod::Builder mknod = request.getReq();
-
-  mknod.setParent(parent);
-  mknod.setName(name);
-  mknod.setMode(mode);
-  mknod.setRdev(rdev);
-
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
-
-  int res = response.getRes();
-
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
-  }
-
-  struct fuse_entry_param e;
-
-  memset(&e, 0, sizeof(e));
-  e.ino = response.getIno();
-  e.attr_timeout = 1.0;
-  e.entry_timeout = 1.0;
-
-  MknodResponse::Attr::Reader attributes = response.getAttr();
-
-  e.attr.st_dev = attributes.getStDev();
-  e.attr.st_ino = attributes.getStIno();
-  e.attr.st_mode = attributes.getStMode();
-  e.attr.st_nlink = attributes.getStNlink();
-  e.attr.st_uid = geteuid();  // attributes.getStUid();
-  e.attr.st_gid = getegid();  // attributes.getStGid();
-  e.attr.st_rdev = attributes.getStRdev();
-  e.attr.st_size = attributes.getStSize();
-  e.attr.st_atime = attributes.getStAtime();
-  e.attr.st_mtime = attributes.getStMtime();
-  e.attr.st_ctime = attributes.getStCtime();
-  e.attr.st_blksize = attributes.getStBlksize();
-  e.attr.st_blocks = attributes.getStBlocks();
-
-  fuse_reply_entry(req, &e);
-
-  // std::cout << "ghostfs_ll_mknod executed correctly: " << payload << std::endl;
 }
 
 /**
@@ -1014,25 +1073,30 @@ static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name
  * @param mask -> int
  */
 static void ghostfs_ll_access(fuse_req_t req, fuse_ino_t ino, int mask) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->accessRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->accessRequest();
 
-  Access::Builder access = request.getReq();
+    Access::Builder access = request.getReq();
 
-  access.setIno(ino);
-  access.setMask(mask);
+    access.setIno(ino);
+    access.setMask(mask);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-  } else {
-    fuse_reply_err(req, 0);
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+    } else {
+      fuse_reply_err(req, 0);
+    }
+  } catch (const kj::Exception& e) {
+    std::cerr << "access error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
 }
 
@@ -1060,66 +1124,67 @@ static void ghostfs_ll_access(fuse_req_t req, fuse_ino_t ino, int mask) {
  */
 static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                               struct fuse_file_info *fi) {
-  // printf("Called .create\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->createRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->createRequest();
+    Create::Builder create = request.getReq();
+    Create::FuseFileInfo::Builder fuseFileInfo = create.initFi();
 
-  Create::Builder create = request.getReq();
-  Create::FuseFileInfo::Builder fuseFileInfo = create.initFi();
+    create.setParent(parent);
+    create.setName(name);
+    create.setMode(mode);
 
-  create.setParent(parent);
-  create.setName(name);
-  create.setMode(mode);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    struct stat attr;
 
-  struct stat attr;
+    memset(&attr, 0, sizeof(attr));
 
-  memset(&attr, 0, sizeof(attr));
+    int res = response.getRes();
 
-  int res = response.getRes();
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
 
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
+    struct fuse_entry_param e;
+
+    memset(&e, 0, sizeof(e));
+    e.ino = response.getIno();
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+
+    CreateResponse::Attr::Reader attributes = response.getAttr();
+
+    e.attr.st_dev = attributes.getStDev();
+    e.attr.st_ino = attributes.getStIno();
+    e.attr.st_mode = attributes.getStMode();
+    e.attr.st_nlink = attributes.getStNlink();
+    e.attr.st_uid = geteuid();  // attributes.getStUid();
+    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_rdev = attributes.getStRdev();
+    e.attr.st_size = attributes.getStSize();
+    e.attr.st_atime = attributes.getStAtime();
+    e.attr.st_mtime = attributes.getStMtime();
+    e.attr.st_ctime = attributes.getStCtime();
+    e.attr.st_blksize = attributes.getStBlksize();
+    e.attr.st_blocks = attributes.getStBlocks();
+
+    CreateResponse::FuseFileInfo::Reader fi_response = response.getFi();
+
+    fi->fh = fi_response.getFh();
+
+    fuse_reply_create(req, &e, fi);
+  } catch (const kj::Exception& e) {
+    std::cerr << "create error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  struct fuse_entry_param e;
-
-  memset(&e, 0, sizeof(e));
-  e.ino = response.getIno();
-  e.attr_timeout = 1.0;
-  e.entry_timeout = 1.0;
-
-  CreateResponse::Attr::Reader attributes = response.getAttr();
-
-  e.attr.st_dev = attributes.getStDev();
-  e.attr.st_ino = attributes.getStIno();
-  e.attr.st_mode = attributes.getStMode();
-  e.attr.st_nlink = attributes.getStNlink();
-  e.attr.st_uid = geteuid();  // attributes.getStUid();
-  e.attr.st_gid = getegid();  // attributes.getStGid();
-  e.attr.st_rdev = attributes.getStRdev();
-  e.attr.st_size = attributes.getStSize();
-  e.attr.st_atime = attributes.getStAtime();
-  e.attr.st_mtime = attributes.getStMtime();
-  e.attr.st_ctime = attributes.getStCtime();
-  e.attr.st_blksize = attributes.getStBlksize();
-  e.attr.st_blocks = attributes.getStBlocks();
-
-  CreateResponse::FuseFileInfo::Reader fi_response = response.getFi();
-
-  fi->fh = fi_response.getFh();
-
-  fuse_reply_create(req, &e, fi);
-
-  // std::cout << "ghostfs_ll_create executed correctly: " << payload << std::endl;
 }
 
 /**
@@ -1131,82 +1196,84 @@ static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *nam
  * @param mode -> uint64_t
  */
 static void ghostfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode) {
-  // printf("Called .mkdir\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->mkdirRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->mkdirRequest();
+    Mkdir::Builder mkdir = request.getReq();
 
-  Mkdir::Builder mkdir = request.getReq();
+    mkdir.setParent(parent);
+    mkdir.setName(name);
+    mkdir.setMode(mode);
 
-  mkdir.setParent(parent);
-  mkdir.setName(name);
-  mkdir.setMode(mode);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
 
-  int res = response.getRes();
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
 
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
+    struct fuse_entry_param e;
+
+    memset(&e, 0, sizeof(e));
+    e.ino = response.getIno();
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+
+    MkdirResponse::Attr::Reader attributes = response.getAttr();
+
+    e.attr.st_dev = attributes.getStDev();
+    e.attr.st_ino = attributes.getStIno();
+    e.attr.st_mode = attributes.getStMode();
+    e.attr.st_nlink = attributes.getStNlink();
+    e.attr.st_uid = geteuid();  // attributes.getStUid();
+    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_rdev = attributes.getStRdev();
+    e.attr.st_size = attributes.getStSize();
+    e.attr.st_atime = attributes.getStAtime();
+    e.attr.st_mtime = attributes.getStMtime();
+    e.attr.st_ctime = attributes.getStCtime();
+    e.attr.st_blksize = attributes.getStBlksize();
+    e.attr.st_blocks = attributes.getStBlocks();
+
+    fuse_reply_entry(req, &e);
+  } catch (const kj::Exception& e) {
+    std::cerr << "mkdir error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  struct fuse_entry_param e;
-
-  memset(&e, 0, sizeof(e));
-  e.ino = response.getIno();
-  e.attr_timeout = 1.0;
-  e.entry_timeout = 1.0;
-
-  MkdirResponse::Attr::Reader attributes = response.getAttr();
-
-  e.attr.st_dev = attributes.getStDev();
-  e.attr.st_ino = attributes.getStIno();
-  e.attr.st_mode = attributes.getStMode();
-  e.attr.st_nlink = attributes.getStNlink();
-  e.attr.st_uid = geteuid();  // attributes.getStUid();
-  e.attr.st_gid = getegid();  // attributes.getStGid();
-  e.attr.st_rdev = attributes.getStRdev();
-  e.attr.st_size = attributes.getStSize();
-  e.attr.st_atime = attributes.getStAtime();
-  e.attr.st_mtime = attributes.getStMtime();
-  e.attr.st_ctime = attributes.getStCtime();
-  e.attr.st_blksize = attributes.getStBlksize();
-  e.attr.st_blocks = attributes.getStBlocks();
-
-  fuse_reply_entry(req, &e);
-
-  // std::cout << "ghostfs_ll_mkdir executed correctly: " << payload << std::endl;
 }
 
 static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
                               fuse_ino_t newparent, const char *newname) {
-  // printf("Called .rename\n");
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->renameRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->renameRequest();
+    Rename::Builder rename = request.getReq();
 
-  Rename::Builder rename = request.getReq();
+    rename.setParent(parent);
+    rename.setName(name);
+    rename.setNewparent(newparent);
+    rename.setNewname(newname);
 
-  rename.setParent(parent);
-  rename.setName(name);
-  rename.setNewparent(newparent);
-  rename.setNewname(newname);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
+    int err = response.getErrno();
 
-  int res = response.getRes();
-  int err = response.getErrno();
-
-  fuse_reply_err(req, res == -1 ? err : 0);
-
-  // std::cout << "ghostfs_ll_rename executed correctly: " << payload << std::endl;
+    fuse_reply_err(req, res == -1 ? err : 0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "rename error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 /**
@@ -1218,26 +1285,29 @@ static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
  * @param mode -> uint64_t
  */
 static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->releaseRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->releaseRequest();
 
-  Release::Builder release = request.getReq();
-  Release::FuseFileInfo::Builder fuseFileInfo = release.initFi();
+    Release::Builder release = request.getReq();
+    Release::FuseFileInfo::Builder fuseFileInfo = release.initFi();
 
-  release.setIno(ino);
-  fillFileInfo(&fuseFileInfo, fi);
+    release.setIno(ino);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
-  int err = response.getErrno();
+    int res = response.getRes();
+    int err = response.getErrno();
 
-  fuse_reply_err(req, res == -1 ? err : 0);
-
-  // std::cout << "ghostfs_ll_release executed correctly: " << payload << std::endl;
+    fuse_reply_err(req, res == -1 ? err : 0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "release error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 /**
@@ -1251,24 +1321,29 @@ static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
 static void ghostfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
   flush_write_back_cache(fi->fh, false);
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->flushRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->flushRequest();
 
-  Flush::Builder flush = request.getReq();
-  Flush::FuseFileInfo::Builder fuseFileInfo = flush.initFi();
+    Flush::Builder flush = request.getReq();
+    Flush::FuseFileInfo::Builder fuseFileInfo = flush.initFi();
 
-  flush.setIno(ino);
-  fillFileInfo(&fuseFileInfo, fi);
+    flush.setIno(ino);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
-  int err = response.getErrno();
+    int res = response.getRes();
+    int err = response.getErrno();
 
-  fuse_reply_err(req, res == -1 ? err : 0);
+    fuse_reply_err(req, res == -1 ? err : 0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "flush error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 /**
@@ -1283,26 +1358,31 @@ static void ghostfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                              struct fuse_file_info *fi) {
   flush_write_back_cache(fi->fh, false);
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->fsyncRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->fsyncRequest();
 
-  Fsync::Builder fsync = request.getReq();
-  Fsync::FuseFileInfo::Builder fuseFileInfo = fsync.initFi();
+    Fsync::Builder fsync = request.getReq();
+    Fsync::FuseFileInfo::Builder fuseFileInfo = fsync.initFi();
 
-  fsync.setIno(ino);
-  fsync.setDatasync(datasync);
+    fsync.setIno(ino);
+    fsync.setDatasync(datasync);
 
-  fillFileInfo(&fuseFileInfo, fi);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
-  int err = response.getErrno();
+    int res = response.getRes();
+    int err = response.getErrno();
 
-  fuse_reply_err(req, res == -1 ? err : 0);
+    fuse_reply_err(req, res == -1 ? err : 0);
+  } catch (const kj::Exception& e) {
+    std::cerr << "fsync error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 /**
@@ -1343,116 +1423,126 @@ static void ghostfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
  */
 static void ghostfs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int to_set,
                                struct fuse_file_info *fi) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->setattrRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->setattrRequest();
 
-  Setattr::Builder setattr = request.getReq();
-  Setattr::FuseFileInfo::Builder fuseFileInfo = setattr.initFi();
-  Setattr::Attr::Builder attributes = setattr.initAttr();
+    Setattr::Builder setattr = request.getReq();
+    Setattr::FuseFileInfo::Builder fuseFileInfo = setattr.initFi();
+    Setattr::Attr::Builder attributes = setattr.initAttr();
 
-  Setattr::Attr::TimeSpec::Builder stAtime = attributes.initStAtime();
-  Setattr::Attr::TimeSpec::Builder stMtime = attributes.initStMtime();
+    Setattr::Attr::TimeSpec::Builder stAtime = attributes.initStAtime();
+    Setattr::Attr::TimeSpec::Builder stMtime = attributes.initStMtime();
 
-  setattr.setIno(ino);
-  setattr.setToSet(to_set);
+    setattr.setIno(ino);
+    setattr.setToSet(to_set);
 
-  attributes.setStDev(attr->st_dev);
-  attributes.setStIno(attr->st_ino);
-  attributes.setStMode(attr->st_mode);
-  attributes.setStNlink(attr->st_nlink);
-  attributes.setStUid(attr->st_uid);
-  attributes.setStGid(attr->st_gid);
-  attributes.setStRdev(attr->st_rdev);
-  attributes.setStSize(attr->st_size);
-  attributes.setStCtime(attr->st_ctime);
-  attributes.setStBlksize(attr->st_blksize);
-  attributes.setStBlocks(attr->st_blocks);
+    attributes.setStDev(attr->st_dev);
+    attributes.setStIno(attr->st_ino);
+    attributes.setStMode(attr->st_mode);
+    attributes.setStNlink(attr->st_nlink);
+    attributes.setStUid(attr->st_uid);
+    attributes.setStGid(attr->st_gid);
+    attributes.setStRdev(attr->st_rdev);
+    attributes.setStSize(attr->st_size);
+    attributes.setStCtime(attr->st_ctime);
+    attributes.setStBlksize(attr->st_blksize);
+    attributes.setStBlocks(attr->st_blocks);
 
-  // clang-format off
-  #if defined(__APPLE__)
-    stAtime.setTvSec(attr->st_atimespec.tv_sec);
-    stAtime.setTvNSec(attr->st_atimespec.tv_nsec);
-    stMtime.setTvSec(attr->st_mtimespec.tv_sec);
-    stMtime.setTvNSec(attr->st_mtimespec.tv_nsec);
-  #else
-    stAtime.setTvSec(attr->st_atim.tv_sec);
-    stAtime.setTvNSec(attr->st_atim.tv_nsec);
-    stMtime.setTvSec(attr->st_mtim.tv_sec);
-    stMtime.setTvNSec(attr->st_mtim.tv_nsec);
-  #endif
+    // clang-format off
+    #if defined(__APPLE__)
+      stAtime.setTvSec(attr->st_atimespec.tv_sec);
+      stAtime.setTvNSec(attr->st_atimespec.tv_nsec);
+      stMtime.setTvSec(attr->st_mtimespec.tv_sec);
+      stMtime.setTvNSec(attr->st_mtimespec.tv_nsec);
+    #else
+      stAtime.setTvSec(attr->st_atim.tv_sec);
+      stAtime.setTvNSec(attr->st_atim.tv_nsec);
+      stMtime.setTvSec(attr->st_mtim.tv_sec);
+      stMtime.setTvNSec(attr->st_mtim.tv_nsec);
+    #endif
 
-  fillFileInfo(&fuseFileInfo, fi);
+    fillFileInfo(&fuseFileInfo, fi);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    ghostfs_ll_getattr(req, response.getIno(), fi);
+  } catch (const kj::Exception& e) {
+    std::cerr << "setattr error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  ghostfs_ll_getattr(req, response.getIno(), fi);
-
-  // std::cout << "ghostfs_ll_setattr executed correctly: " << payload << std::endl;
 }
 
 #ifdef __APPLE__
 static void ghostfs_ll_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name, const char *value,
                               size_t size, int flags, uint32_t position) {
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->setxattrRequest();
 
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->setxattrRequest();
+    Setxattr::Builder setxattr = request.getReq();
 
-  Setxattr::Builder setxattr = request.getReq();
+    setxattr.setIno(ino);
+    setxattr.setName(name);
+    setxattr.setValue(value);
+    setxattr.setSize(size);
+    setxattr.setFlags(flags);
+    setxattr.setPosition(position);
 
-  setxattr.setIno(ino);
-  setxattr.setName(name);
-  setxattr.setValue(value);
-  setxattr.setSize(size);
-  setxattr.setFlags(flags);
-  setxattr.setPosition(position);
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    int res = response.getRes();
 
-  int res = response.getRes();
-
-  if (res == -1) {
-    fuse_reply_err(req, response.getErrno());
-    return;
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+  } catch (const kj::Exception& e) {
+    std::cerr << "setxattr error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
-
-  // std::cout << "ghostfs_ll_setxattr executed correctly: " << payload << std::endl;
 }
 #endif
 
 static void ghostfs_ll_readlink(fuse_req_t req, fuse_ino_t ino) {
-  auto &rpc = getRpc();
-  auto &waitScope = rpc.ioContext->waitScope;
-  auto request = rpc.client->readlinkRequest();
+  try {
+    auto &rpc = getRpc();
+    auto &waitScope = rpc.ioContext->waitScope;
+    auto &timer = rpc.getTimer();
+    auto request = rpc.client->readlinkRequest();
 
-  Readlink::Builder readlink = request.getReq();
+    Readlink::Builder readlink = request.getReq();
 
-  readlink.setIno(ino);
+    readlink.setIno(ino);
 
-  auto promise = request.send();
-  auto result = promise.wait(waitScope);
-  auto response = result.getRes();
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
 
-  int res = response.getRes();
+    int res = response.getRes();
 
-  if (res == -1) {
-    int err = response.getErrno();
-    fuse_reply_err(req, err);
-  } else {
-    std::string link = response.getLink();
-    fuse_reply_readlink(req, link.c_str());
+    if (res == -1) {
+      int err = response.getErrno();
+      fuse_reply_err(req, err);
+    } else {
+      std::string link = response.getLink();
+      fuse_reply_readlink(req, link.c_str());
+    }
+  } catch (const kj::Exception& e) {
+    std::cerr << "readlink error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
   }
 }
 

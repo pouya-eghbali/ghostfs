@@ -779,16 +779,22 @@ public:
     path_to_ino.erase(file_path);
 
     // fix ino to path recursively if we rename a directory
-    if (std::filesystem::is_directory(newfile_path)) {
+    // Use symlink_status to check if it's actually a directory (not a symlink to one)
+    // This prevents re-entry deadlocks when symlinks point back to the FUSE mount
+    auto status = std::filesystem::symlink_status(newfile_path);
+    if (std::filesystem::is_directory(status)) {
       for(const auto& entry: std::filesystem::recursive_directory_iterator(newfile_path)) {
         std::filesystem::path new_name = entry.path();
         std::filesystem::path relative = std::filesystem::relative(new_name, newfile_path);
         std::filesystem::path old_name = file_path / relative;
-        
-        int64_t ino = path_to_ino[old_name];
-        ino_to_path[ino] = new_name;
-        path_to_ino[new_name] = ino;
-        path_to_ino.erase(old_name);
+
+        // Check if old_name exists in path_to_ino before accessing to prevent auto-vivification
+        if (path_to_ino.contains(old_name)) {
+          int64_t ino = path_to_ino[old_name];
+          ino_to_path[ino] = new_name;
+          path_to_ino[new_name] = ino;
+          path_to_ino.erase(old_name);
+        }
       }
     }
 
