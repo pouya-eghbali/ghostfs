@@ -1,7 +1,10 @@
 #include <ghostfs/fs.h>
 #include <ghostfs/ghostfs.h>
-#include <ghostfs/rpc.h>
 #include <ghostfs/version.h>
+
+#ifndef _WIN32
+#include <ghostfs/rpc.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -71,7 +74,10 @@ auto main(int argc, char** argv) -> int {
   }
 
   if (result["server"].as<bool>()) {
-#ifndef _WIN32
+#ifdef _WIN32
+    std::cerr << "Error: Server mode is not supported on Windows" << std::endl;
+    return 1;
+#else
     // Increase stack size (Unix only)
     const rlim_t min_stack_size = 64 * 1024 * 1024;
     struct rlimit rl;
@@ -82,7 +88,6 @@ auto main(int argc, char** argv) -> int {
         setrlimit(RLIMIT_STACK, &rl);
       }
     }
-#endif
 
     std::string root = result["root"].as<std::string>();
     std::string bind = result["bind"].as<std::string>();
@@ -94,6 +99,7 @@ auto main(int argc, char** argv) -> int {
     uint16_t auth_port = result["auth-port"].as<uint16_t>();
 
     return start_rpc_server(bind, port, auth_port, root, suffix, key, cert);
+#endif
 
   } else if (result["client"].as<bool>()) {
     std::string host = result["host"].as<std::string>();
@@ -129,33 +135,55 @@ auto main(int argc, char** argv) -> int {
 #endif
 
   } else if (result["authorize"].as<bool>()) {
+#ifdef _WIN32
+    std::cerr << "Error: Authorize mode is not supported on Windows" << std::endl;
+    return 1;
+#else
     uint16_t port = result["auth-port"].as<uint16_t>();
     std::string user = result["user"].as<std::string>();
     std::string token = result["token"].as<std::string>();
     int64_t retries = result["retries"].as<int64_t>();
 
     return rpc_add_token(port, user, token, retries);
+#endif
 
   } else if (result["mount"].as<bool>()) {
+#ifdef _WIN32
+    std::cerr << "Error: Soft mount is not supported on Windows" << std::endl;
+    return 1;
+#else
     uint16_t port = result["auth-port"].as<uint16_t>();
     std::string user = result["user"].as<std::string>();
     std::string source = result["source"].as<std::string>();
     std::string destination = result["destination"].as<std::string>();
 
     return rpc_mount(port, user, source, destination);
+#endif
 
   } else if (result["mounts"].as<bool>()) {
+#ifdef _WIN32
+    std::cerr << "Error: Soft mount listing is not supported on Windows" << std::endl;
+    return 1;
+#else
     uint16_t port = result["auth-port"].as<uint16_t>();
     std::string user = result["user"].as<std::string>();
 
     return rpc_print_mounts(port, user);
+#endif
 
   } else if (result["unmount"].as<bool>()) {
+#ifdef _WIN32
+    std::cerr << "Error: Soft unmount is not supported on Windows" << std::endl;
+    return 1;
+#else
     uint16_t port = result["auth-port"].as<uint16_t>();
     std::string user = result["user"].as<std::string>();
     std::string destination = result["destination"].as<std::string>();
 
     return destination.length() ? rpc_unmount(port, user, destination)
                                 : rpc_unmount_all(port, user);
+#endif
   }
+
+  return 0;
 }
