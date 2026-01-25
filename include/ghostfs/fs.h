@@ -11,7 +11,7 @@
 int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
                      std::string user, std::string token,
                      uint8_t write_back_cache_size, uint8_t read_ahead_cache_size,
-                     std::string cert_file);
+                     std::string cert_file, bool test_mode = false);
 
 #else
 // Linux/macOS: FUSE implementation

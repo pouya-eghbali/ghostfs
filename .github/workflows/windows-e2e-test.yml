@@ -139,12 +139,13 @@ jobs:
             Fail "Cannot connect to server: $_"
           }
 
-          # Test client can start and connect (even if mount visibility is limited in CI)
-          # Note: Full drive mount testing is limited in CI due to Windows session isolation
-          Write-Host "`nStarting client connection test..."
+          # Run internal file operation tests
+          # The --test flag runs tests from within the client process,
+          # bypassing Windows session isolation issues in CI
+          Write-Host "`nRunning file operation tests with --test mode..."
           $pinfo = New-Object System.Diagnostics.ProcessStartInfo
           $pinfo.FileName = "build/standalone/Release/GhostFS.exe"
-          $pinfo.Arguments = "--client --host localhost --port 3444 -u testuser -t $env:TOKEN G:"
+          $pinfo.Arguments = "--client --host localhost --port 3444 -u testuser -t $env:TOKEN --test G:"
           $pinfo.UseShellExecute = $false
           $pinfo.RedirectStandardOutput = $true
           $pinfo.RedirectStandardError = $true
@@ -154,44 +155,25 @@ jobs:
           $p.StartInfo = $pinfo
           $p.Start() | Out-Null
 
-          # Give it time to connect and attempt mount
-          Start-Sleep -Seconds 5
+          # Wait for test completion (timeout 60 seconds)
+          $completed = $p.WaitForExit(60000)
 
-          # Read output
-          $stdout = ""
-          $stderr = ""
-          if ($p.HasExited) {
-            $stdout = $p.StandardOutput.ReadToEnd()
-            $stderr = $p.StandardError.ReadToEnd()
-          } else {
-            # Process is still running, try to get available output
-            Start-Sleep -Seconds 2
+          $stdout = $p.StandardOutput.ReadToEnd()
+          $stderr = $p.StandardError.ReadToEnd()
+
+          Write-Host "Client stdout:`n$stdout"
+          if ($stderr) {
+            Write-Host "Client stderr:`n$stderr"
           }
 
-          Write-Host "Client stdout: $stdout"
-          Write-Host "Client stderr: $stderr"
-
-          if ($stdout -match "Connected to the GhostFS server" -or $p.HasExited -eq $false) {
-            Pass "Client connected to server"
-          } else {
-            Fail "Client failed to connect"
-          }
-
-          # Check if client reported successful mount
-          if ($stdout -match "Mounted GhostFS") {
-            Pass "Client reported mount success"
-          } elseif (-not $p.HasExited) {
-            Pass "Client still running (mount in progress)"
-          }
-
-          # Note: Drive mount visibility testing is skipped in CI
-          # WinFSP mounts may not be visible across Windows sessions in GitHub Actions
-          Write-Host "`nNote: Full drive mount testing skipped - CI session isolation limitation"
-          Write-Host "The Windows build and WinFSP integration are verified."
-
-          # Cleanup
-          if (-not $p.HasExited) {
+          # Check test results
+          if (-not $completed) {
+            Fail "File operation tests timed out"
             $p.Kill()
+          } elseif ($p.ExitCode -eq 0) {
+            Pass "All file operation tests passed"
+          } else {
+            Fail "File operation tests failed (exit code: $($p.ExitCode))"
           }
 
           Write-Host "`n=========================================="

@@ -54,6 +54,9 @@ auto main(int argc, char** argv) -> int {
     ("U,unmount", "Soft unmount a directory")
     ("s,server", "Run in server mode")
     ("c,client", "Run in client mode")
+#ifdef _WIN32
+    ("test", "Run internal file operation tests (for CI)")
+#endif
     ("mountpoint", "Mount point for client mode", cxxopts::value<std::string>()->default_value(""));
 
   // clang-format on
@@ -122,7 +125,8 @@ auto main(int argc, char** argv) -> int {
     std::wstring wmountpoint(wsize, 0);
     MultiByteToWideChar(CP_UTF8, 0, mountpoint.c_str(), -1, &wmountpoint[0], wsize);
 
-    return start_fs_windows(wmountpoint.c_str(), host, port, user, token, write_back, read_ahead, cert);
+    bool test_mode = result["test"].as<bool>();
+    return start_fs_windows(wmountpoint.c_str(), host, port, user, token, write_back, read_ahead, cert, test_mode);
 #else
     std::vector<std::string> fuse_options;
     if (result.count("options")) {

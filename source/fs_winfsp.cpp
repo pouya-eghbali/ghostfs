@@ -1009,10 +1009,187 @@ static FSP_FILE_SYSTEM_INTERFACE GhostFSInterface = {
 // Global stop flag for dispatcher
 static volatile LONG g_StopDispatcher = 0;
 
+// Run file operation tests from within the client process
+// This bypasses Windows session isolation issues in CI
+static int run_internal_tests(const std::wstring& mount_root) {
+  int passed = 0, failed = 0;
+
+  auto test_pass = [&](const char* name) {
+    std::cout << "[PASS] " << name << std::endl;
+    passed++;
+  };
+  auto test_fail = [&](const char* name, const char* reason) {
+    std::cout << "[FAIL] " << name << ": " << reason << std::endl;
+    failed++;
+  };
+
+  std::wstring root = mount_root;
+  if (root.back() != L'\\') root += L'\\';
+
+  // Test 1: Create file
+  {
+    std::wstring path = root + L"test1.txt";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      const char* data = "hello world";
+      DWORD written;
+      WriteFile(h, data, (DWORD)strlen(data), &written, nullptr);
+      CloseHandle(h);
+      test_pass("Create file");
+    } else {
+      test_fail("Create file", "CreateFileW failed");
+    }
+  }
+
+  // Test 2: Read file
+  {
+    std::wstring path = root + L"test1.txt";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      char buf[256] = {0};
+      DWORD read;
+      ReadFile(h, buf, sizeof(buf) - 1, &read, nullptr);
+      CloseHandle(h);
+      if (strcmp(buf, "hello world") == 0) {
+        test_pass("Read file");
+      } else {
+        test_fail("Read file", "Content mismatch");
+      }
+    } else {
+      test_fail("Read file", "CreateFileW failed");
+    }
+  }
+
+  // Test 3: Create directory
+  {
+    std::wstring path = root + L"testdir";
+    if (CreateDirectoryW(path.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
+      DWORD attr = GetFileAttributesW(path.c_str());
+      if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        test_pass("Create directory");
+      } else {
+        test_fail("Create directory", "Not a directory");
+      }
+    } else {
+      test_fail("Create directory", "CreateDirectoryW failed");
+    }
+  }
+
+  // Test 4: Write file in directory
+  {
+    std::wstring path = root + L"testdir\\nested.txt";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      const char* data = "nested content";
+      DWORD written;
+      WriteFile(h, data, (DWORD)strlen(data), &written, nullptr);
+      CloseHandle(h);
+      test_pass("Write file in directory");
+    } else {
+      test_fail("Write file in directory", "CreateFileW failed");
+    }
+  }
+
+  // Test 5: List directory
+  {
+    std::wstring path = root + L"testdir\\*";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(path.c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+      int count = 0;
+      do {
+        if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+          count++;
+        }
+      } while (FindNextFileW(h, &fd));
+      FindClose(h);
+      if (count >= 1) {
+        test_pass("List directory");
+      } else {
+        test_fail("List directory", "No files found");
+      }
+    } else {
+      test_fail("List directory", "FindFirstFileW failed");
+    }
+  }
+
+  // Test 6: Delete file
+  {
+    std::wstring path = root + L"test1.txt";
+    if (DeleteFileW(path.c_str())) {
+      if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        test_pass("Delete file");
+      } else {
+        test_fail("Delete file", "File still exists");
+      }
+    } else {
+      test_fail("Delete file", "DeleteFileW failed");
+    }
+  }
+
+  // Test 7: Rename file
+  {
+    std::wstring src = root + L"testdir\\nested.txt";
+    std::wstring dst = root + L"testdir\\renamed.txt";
+    if (MoveFileW(src.c_str(), dst.c_str())) {
+      if (GetFileAttributesW(dst.c_str()) != INVALID_FILE_ATTRIBUTES &&
+          GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        test_pass("Rename file");
+      } else {
+        test_fail("Rename file", "Rename verification failed");
+      }
+    } else {
+      test_fail("Rename file", "MoveFileW failed");
+    }
+  }
+
+  // Test 8: Binary file (write and verify)
+  {
+    std::wstring path = root + L"binary.dat";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      unsigned char data[256];
+      for (int i = 0; i < 256; i++) data[i] = (unsigned char)i;
+      DWORD written;
+      WriteFile(h, data, 256, &written, nullptr);
+      CloseHandle(h);
+
+      h = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h != INVALID_HANDLE_VALUE) {
+        unsigned char buf[256];
+        DWORD read;
+        ReadFile(h, buf, 256, &read, nullptr);
+        CloseHandle(h);
+        if (read == 256 && memcmp(data, buf, 256) == 0) {
+          test_pass("Binary file");
+        } else {
+          test_fail("Binary file", "Content mismatch");
+        }
+      } else {
+        test_fail("Binary file", "Read failed");
+      }
+    } else {
+      test_fail("Binary file", "Write failed");
+    }
+  }
+
+  // Cleanup
+  DeleteFileW((root + L"testdir\\renamed.txt").c_str());
+  DeleteFileW((root + L"binary.dat").c_str());
+  RemoveDirectoryW((root + L"testdir").c_str());
+
+  std::cout << "\n==========================================" << std::endl;
+  std::cout << "Passed: " << passed << std::endl;
+  std::cout << "Failed: " << failed << std::endl;
+  std::cout << "==========================================" << std::endl;
+
+  return failed > 0 ? 1 : 0;
+}
+
 int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
                      std::string user, std::string token,
                      uint8_t write_back_cache_size, uint8_t read_ahead_cache_size,
-                     std::string cert_file) {
+                     std::string cert_file, bool test_mode) {
 
   // Initialize connection
   if (!init_connection(host, port, user, token, cert_file, write_back_cache_size, read_ahead_cache_size)) {
@@ -1062,6 +1239,17 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
   }
 
   std::wcout << L"Mounted GhostFS at " << mountpoint << std::endl;
+
+  // If test mode, run internal tests and exit
+  if (test_mode) {
+    std::cout << "Running internal file operation tests..." << std::endl;
+    Sleep(1000); // Give filesystem time to stabilize
+    int result = run_internal_tests(mountpoint);
+    FspFileSystemStopDispatcher(g_FileSystem);
+    FspFileSystemDelete(g_FileSystem);
+    return result;
+  }
+
   std::cout << "Press Ctrl+C to unmount..." << std::endl;
 
   // Reset stop flag
