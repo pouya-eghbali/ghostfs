@@ -1262,10 +1262,26 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
 
   std::wcout << L"Mounted GhostFS at " << mountpoint << std::endl;
 
+  // Verify the mount is working by checking file system info
+  std::wcout << L"Verifying mount..." << std::endl;
+  std::wcout << L"FileSystem pointer: " << g_FileSystem << std::endl;
+  if (g_FileSystem) {
+    std::wcout << L"MountPoint: " << (FspFileSystemMountPoint(g_FileSystem) ? FspFileSystemMountPoint(g_FileSystem) : L"(null)") << std::endl;
+  }
+
   // If test mode, run internal tests and exit
   if (test_mode) {
     std::cout << "Running internal file operation tests..." << std::endl;
-    Sleep(2000); // Give filesystem time to stabilize
+    std::cout << "Waiting for filesystem to stabilize..." << std::endl;
+    Sleep(3000); // Give filesystem more time to stabilize
+
+    // Verify drive exists before testing
+    std::wstring driveRoot = std::wstring(mountpoint);
+    if (driveRoot.back() != L'\\') driveRoot += L'\\';
+
+    DWORD driveType = GetDriveTypeW(driveRoot.c_str());
+    std::wcout << L"Drive type for " << driveRoot << L": " << driveType << std::endl;
+    std::cout << "(0=unknown, 1=no_root, 2=removable, 3=fixed, 4=remote, 5=cdrom, 6=ramdisk)" << std::endl;
 
     // Run tests in a separate thread to avoid blocking dispatcher
     std::wstring mp(mountpoint);

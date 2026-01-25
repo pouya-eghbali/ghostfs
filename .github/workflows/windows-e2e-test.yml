@@ -162,9 +162,7 @@ jobs:
           $stderr = $p.StandardError.ReadToEnd()
 
           Write-Host "Client stdout:`n$stdout"
-          if ($stderr) {
-            Write-Host "Client stderr:`n$stderr"
-          }
+          Write-Host "Client stderr:`n$stderr"
 
           # Check test results
           if (-not $completed) {
