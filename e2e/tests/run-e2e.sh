@@ -344,56 +344,76 @@ test_overwrite_file() {
 }
 
 # Test 16: Large file integrity with hash verification (32MB)
-# Tests readahead/writeback cache integrity by:
-# 1. Creating a random file locally
-# 2. Copying to GhostFS and verifying hash
-# 3. Copying back from GhostFS and verifying hash
+# Tests readahead/writeback cache integrity with different cache sizes
+# For each cache size:
+# 1. Remount client with specified cache settings
+# 2. Create a random file locally
+# 3. Copy to GhostFS and verify hash
+# 4. Copy back from GhostFS and verify hash
 test_large_file_integrity() {
     local size_mb=32
     local local_original="/tmp/test_integrity_original.bin"
     local ghostfs_file="$MOUNT/test_integrity.bin"
     local local_copy="/tmp/test_integrity_copy.bin"
+    local cache_sizes=(8 32 64 128 255)
 
-    log_info "Creating ${size_mb}MB random file for integrity test..."
+    log_info "Creating ${size_mb}MB random file for integrity tests..."
 
-    # Create random file locally
+    # Create random file locally (once, reuse for all cache sizes)
     dd if=/dev/urandom of="$local_original" bs=1M count=$size_mb 2>/dev/null
 
     # Calculate hash of original
     local hash_original=$(sha256sum "$local_original" | cut -d' ' -f1)
     log_info "Original hash: $hash_original"
 
-    # Copy to GhostFS
-    log_info "Copying to GhostFS..."
-    cp "$local_original" "$ghostfs_file"
+    for cache_size in "${cache_sizes[@]}"; do
+        log_info "Testing with cache size: $cache_size"
 
-    # Sync to ensure all writes are flushed
-    sync
+        # Unmount current client
+        fusermount -u "$MOUNT" 2>/dev/null || umount "$MOUNT" 2>/dev/null || true
+        sleep 1
 
-    # Calculate hash of file on GhostFS
-    local hash_ghostfs=$(sha256sum "$ghostfs_file" | cut -d' ' -f1)
-    log_info "GhostFS hash: $hash_ghostfs"
+        # Remount with new cache settings
+        ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
+            --write-back "$cache_size" --read-ahead "$cache_size" "$MOUNT" &
+        sleep 2
 
-    # Copy back from GhostFS
-    log_info "Copying back from GhostFS..."
-    cp "$ghostfs_file" "$local_copy"
+        if ! mountpoint -q "$MOUNT"; then
+            log_fail "Cache integrity (cache=$cache_size) - failed to remount"
+            continue
+        fi
 
-    # Calculate hash of copied file
-    local hash_copy=$(sha256sum "$local_copy" | cut -d' ' -f1)
-    log_info "Copy hash: $hash_copy"
+        # Remove old test file if exists
+        rm -f "$ghostfs_file" 2>/dev/null || true
 
-    # Clean up temp files
-    rm -f "$local_original" "$local_copy"
+        # Copy to GhostFS
+        cp "$local_original" "$ghostfs_file"
+        sync
 
-    # Verify all hashes match
-    if [ "$hash_original" = "$hash_ghostfs" ] && [ "$hash_ghostfs" = "$hash_copy" ]; then
-        log_pass "Large file integrity (${size_mb}MB, SHA256 verified)"
-    else
-        log_fail "Large file integrity - hash mismatch:"
-        log_fail "  Original: $hash_original"
-        log_fail "  GhostFS:  $hash_ghostfs"
-        log_fail "  Copy:     $hash_copy"
-    fi
+        # Calculate hash of file on GhostFS
+        local hash_ghostfs=$(sha256sum "$ghostfs_file" | cut -d' ' -f1)
+
+        # Copy back from GhostFS
+        cp "$ghostfs_file" "$local_copy"
+
+        # Calculate hash of copied file
+        local hash_copy=$(sha256sum "$local_copy" | cut -d' ' -f1)
+
+        # Verify all hashes match
+        if [ "$hash_original" = "$hash_ghostfs" ] && [ "$hash_ghostfs" = "$hash_copy" ]; then
+            log_pass "Cache integrity (${size_mb}MB, cache=$cache_size)"
+        else
+            log_fail "Cache integrity (cache=$cache_size) - hash mismatch:"
+            log_fail "  Original: $hash_original"
+            log_fail "  GhostFS:  $hash_ghostfs"
+            log_fail "  Copy:     $hash_copy"
+        fi
+
+        rm -f "$local_copy"
+    done
+
+    # Clean up
+    rm -f "$local_original"
 }
 
 # Run all tests (disable set -e so test failures don't abort)
