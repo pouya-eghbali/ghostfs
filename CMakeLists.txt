@@ -30,11 +30,17 @@ message("OpenSSL Include: ${OPENSSL_INCLUDE_DIR}")
 # PackageProject.cmake will be used to make our target installable
 CPMAddPackage("gh:TheLartians/PackageProject.cmake@1.8.0")
 
-CPMAddPackage(
-  NAME uuid_v4
-  VERSION 1.0.0
-  GITHUB_REPOSITORY crashoz/uuid_v4
-)
+# Only use uuid_v4 on x86 platforms (it requires SSE/AVX)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i686")
+  CPMAddPackage(
+    NAME uuid_v4
+    VERSION 1.0.0
+    GITHUB_REPOSITORY crashoz/uuid_v4
+  )
+  set(USE_UUID_V4 ON)
+else()
+  set(USE_UUID_V4 OFF)
+endif()
 
 CPMAddPackage(
   NAME capnproto
@@ -93,8 +99,10 @@ set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 20)
 # being a cross-platform target, we enforce standards conformance on MSVC
 target_compile_options(${PROJECT_NAME} PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->")
 
-# enable avx2
-target_compile_options(${PROJECT_NAME} PUBLIC "-mavx2")
+# enable avx2 on x86 platforms only
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i686")
+  target_compile_options(${PROJECT_NAME} PUBLIC "-mavx2")
+endif()
 
 # Link dependencies
 target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt)
@@ -103,10 +111,14 @@ target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::capnp-rpc)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::kj-tls)
 target_link_libraries(${PROJECT_NAME} PUBLIC ${FUSE_LIBRARIES})
 
-target_include_directories(
-  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${uuid_v4_SOURCE_DIR}>
-  $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
-)
+# uuid_v4 include only on x86
+if(USE_UUID_V4)
+  target_include_directories(
+    ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${uuid_v4_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
+  )
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_UUID_V4)
+endif()
 
 target_include_directories(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
