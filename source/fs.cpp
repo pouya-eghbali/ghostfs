@@ -89,7 +89,7 @@ struct cached_write {
   char *buf;
   size_t size;
   off_t off;
-  struct fuse_file_info *fi;
+  struct fuse_file_info fi;  // Store copy, not pointer (stack memory invalid after write returns)
 };
 
 struct cached_read {
@@ -736,12 +736,12 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
 uint64_t add_to_write_back_cache(cached_write cache) {
   std::lock_guard<std::mutex> lock(write_cache_mutex);
 
-  if (not write_back_cache.contains(cache.fi->fh)) {
-    write_back_cache[cache.fi->fh] = std::vector<cached_write>();
+  if (not write_back_cache.contains(cache.fi.fh)) {
+    write_back_cache[cache.fi.fh] = std::vector<cached_write>();
   }
 
-  write_back_cache[cache.fi->fh].push_back(cache);
-  return write_back_cache[cache.fi->fh].size();
+  write_back_cache[cache.fi.fh].push_back(cache);
+  return write_back_cache[cache.fi.fh].size();
 }
 
 void flush_write_back_cache(uint64_t fh, bool reply) {
@@ -784,7 +784,7 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
       write[i].setBuf(buf_reader);
 
       Write::FuseFileInfo::Builder fuseFileInfo = write[i].initFi();
-      fillFileInfo(&fuseFileInfo, cache.fi);
+      fillFileInfo(&fuseFileInfo, &cache.fi);
 
       i++;
     }
@@ -848,7 +848,7 @@ static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, si
   }
 
   if (max_write_back_cache > 0) {
-    cached_write cache = {req, ino, (char *)malloc(size), size, off, fi};
+    cached_write cache = {req, ino, (char *)malloc(size), size, off, *fi};  // Copy fi, not pointer
     memcpy(cache.buf, buf, size);
     uint64_t cached = add_to_write_back_cache(cache);
 
@@ -1285,6 +1285,9 @@ static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
  * @param mode -> uint64_t
  */
 static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+  // Flush any pending writes before releasing the file handle
+  flush_write_back_cache(fi->fh, false);
+
   try {
     auto &rpc = getRpc();
     auto &waitScope = rpc.ioContext->waitScope;
