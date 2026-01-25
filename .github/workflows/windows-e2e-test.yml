@@ -158,7 +158,9 @@ jobs:
             -PassThru -NoNewWindow -RedirectStandardOutput "client.log" -RedirectStandardError "client-err.log"
 
           Write-Host "Client PID: $($client.Id)"
-          Start-Sleep -Seconds 5
+
+          # Wait longer for mount to be ready
+          Start-Sleep -Seconds 10
 
           # Check if client is still running
           $proc = Get-Process -Id $client.Id -ErrorAction SilentlyContinue
@@ -175,6 +177,25 @@ jobs:
           Write-Host "=== Client stderr ==="
           Get-Content "client-err.log" -ErrorAction SilentlyContinue
           Write-Host "=== End logs ==="
+
+          # List all drives to debug
+          Write-Host "=== Available drives ==="
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
+          # Try different access methods
+          Write-Host "=== Checking mount accessibility ==="
+          Write-Host "Test-Path G:\: $(Test-Path 'G:\')"
+          Write-Host "Test-Path G:: $(Test-Path 'G:')"
+          $driveG = Get-PSDrive -Name G -ErrorAction SilentlyContinue
+          if ($driveG) {
+            Write-Host "Drive G found via Get-PSDrive"
+          } else {
+            Write-Host "Drive G not found via Get-PSDrive"
+          }
+
+          # Check if we can access via .NET
+          $exists = [System.IO.Directory]::Exists("G:\")
+          Write-Host ".NET Directory.Exists: $exists"
 
           if (-not (Test-Path "G:\")) {
             Write-Error "Mount failed - G: not accessible"; exit 1
