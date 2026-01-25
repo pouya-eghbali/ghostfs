@@ -1018,17 +1018,20 @@ static int run_internal_tests(const std::wstring& mount_root) {
     std::cout << "[PASS] " << name << std::endl;
     passed++;
   };
-  auto test_fail = [&](const char* name, const char* reason) {
-    std::cout << "[FAIL] " << name << ": " << reason << std::endl;
+  auto test_fail = [&](const char* name, DWORD err) {
+    std::cout << "[FAIL] " << name << " (error " << err << ")" << std::endl;
     failed++;
   };
 
   std::wstring root = mount_root;
   if (root.back() != L'\\') root += L'\\';
 
+  std::wcout << L"Test root: " << root << std::endl;
+
   // Test 1: Create file
   {
     std::wstring path = root + L"test1.txt";
+    std::wcout << L"Creating: " << path << std::endl;
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
       const char* data = "hello world";
@@ -1037,7 +1040,7 @@ static int run_internal_tests(const std::wstring& mount_root) {
       CloseHandle(h);
       test_pass("Create file");
     } else {
-      test_fail("Create file", "CreateFileW failed");
+      test_fail("Create file", GetLastError());
     }
   }
 
@@ -1053,10 +1056,11 @@ static int run_internal_tests(const std::wstring& mount_root) {
       if (strcmp(buf, "hello world") == 0) {
         test_pass("Read file");
       } else {
-        test_fail("Read file", "Content mismatch");
+        std::cout << "[FAIL] Read file: content mismatch, got '" << buf << "'" << std::endl;
+        failed++;
       }
     } else {
-      test_fail("Read file", "CreateFileW failed");
+      test_fail("Read file", GetLastError());
     }
   }
 
@@ -1068,10 +1072,10 @@ static int run_internal_tests(const std::wstring& mount_root) {
       if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
         test_pass("Create directory");
       } else {
-        test_fail("Create directory", "Not a directory");
+        test_fail("Create directory (not a dir)", GetLastError());
       }
     } else {
-      test_fail("Create directory", "CreateDirectoryW failed");
+      test_fail("Create directory", GetLastError());
     }
   }
 
@@ -1086,7 +1090,7 @@ static int run_internal_tests(const std::wstring& mount_root) {
       CloseHandle(h);
       test_pass("Write file in directory");
     } else {
-      test_fail("Write file in directory", "CreateFileW failed");
+      test_fail("Write file in directory", GetLastError());
     }
   }
 
@@ -1106,10 +1110,11 @@ static int run_internal_tests(const std::wstring& mount_root) {
       if (count >= 1) {
         test_pass("List directory");
       } else {
-        test_fail("List directory", "No files found");
+        std::cout << "[FAIL] List directory: no files found" << std::endl;
+        failed++;
       }
     } else {
-      test_fail("List directory", "FindFirstFileW failed");
+      test_fail("List directory", GetLastError());
     }
   }
 
@@ -1120,10 +1125,11 @@ static int run_internal_tests(const std::wstring& mount_root) {
       if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         test_pass("Delete file");
       } else {
-        test_fail("Delete file", "File still exists");
+        std::cout << "[FAIL] Delete file: file still exists" << std::endl;
+        failed++;
       }
     } else {
-      test_fail("Delete file", "DeleteFileW failed");
+      test_fail("Delete file", GetLastError());
     }
   }
 
@@ -1136,10 +1142,11 @@ static int run_internal_tests(const std::wstring& mount_root) {
           GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) {
         test_pass("Rename file");
       } else {
-        test_fail("Rename file", "Rename verification failed");
+        std::cout << "[FAIL] Rename file: verification failed" << std::endl;
+        failed++;
       }
     } else {
-      test_fail("Rename file", "MoveFileW failed");
+      test_fail("Rename file", GetLastError());
     }
   }
 
@@ -1163,13 +1170,14 @@ static int run_internal_tests(const std::wstring& mount_root) {
         if (read == 256 && memcmp(data, buf, 256) == 0) {
           test_pass("Binary file");
         } else {
-          test_fail("Binary file", "Content mismatch");
+          std::cout << "[FAIL] Binary file: content mismatch (read " << read << " bytes)" << std::endl;
+          failed++;
         }
       } else {
-        test_fail("Binary file", "Read failed");
+        test_fail("Binary file read", GetLastError());
       }
     } else {
-      test_fail("Binary file", "Write failed");
+      test_fail("Binary file write", GetLastError());
     }
   }
 
