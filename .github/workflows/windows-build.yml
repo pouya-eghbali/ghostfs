@@ -44,7 +44,7 @@ jobs:
         shell: powershell
         run: |
           # Download WinFSP installer (v2.1 - latest stable)
-          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.24312.msi"
+          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
           Write-Host "Downloading WinFSP from $winfspUrl"
 
           # Use curl with retries (more reliable than Invoke-WebRequest for large files)
@@ -169,7 +169,7 @@ jobs:
         shell: powershell
         run: |
           # Download WinFSP installer (v2.1 - latest stable)
-          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.24312.msi"
+          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
           Write-Host "Downloading WinFSP from $winfspUrl"
 
           # Use curl with retries (more reliable than Invoke-WebRequest)
