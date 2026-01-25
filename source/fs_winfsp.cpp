@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Cap'n Proto
@@ -1251,11 +1252,20 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
   // If test mode, run internal tests and exit
   if (test_mode) {
     std::cout << "Running internal file operation tests..." << std::endl;
-    Sleep(1000); // Give filesystem time to stabilize
-    int result = run_internal_tests(mountpoint);
+    Sleep(2000); // Give filesystem time to stabilize
+
+    // Run tests in a separate thread to avoid blocking dispatcher
+    std::wstring mp(mountpoint);
+    int test_result = 1;
+    std::thread test_thread([&mp, &test_result]() {
+      Sleep(500); // Extra delay for thread safety
+      test_result = run_internal_tests(mp);
+    });
+    test_thread.join();
+
     FspFileSystemStopDispatcher(g_FileSystem);
     FspFileSystemDelete(g_FileSystem);
-    return result;
+    return test_result;
   }
 
   std::cout << "Press Ctrl+C to unmount..." << std::endl;
