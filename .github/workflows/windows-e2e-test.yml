@@ -102,16 +102,21 @@ jobs:
           }
           Write-Host "Client binary found"
 
-          # Check WinFSP installation
+          # Check WinFSP installation and driver
           Write-Host "=== WinFSP Check ==="
           $winfspDll = "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
           if (Test-Path $winfspDll) {
             Write-Host "WinFSP DLL found: $winfspDll"
           } else {
             Write-Host "WinFSP DLL not found at expected location"
-            # List WinFsp directory
             Get-ChildItem "C:\Program Files (x86)\WinFsp\" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
           }
+
+          # Check WinFSP driver/service status
+          Write-Host "=== WinFSP Driver Status ==="
+          Get-Service -Name WinFsp* -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          sc.exe query WinFsp.Launcher
+          sc.exe query WinFsp.Np
 
           # Add WinFSP to PATH
           $env:PATH = "C:\Program Files (x86)\WinFsp\bin;$env:PATH"
