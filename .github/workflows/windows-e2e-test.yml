@@ -73,20 +73,25 @@ jobs:
 
       - name: Create test user token
         id: auth
-        shell: wsl-bash {0}
+        shell: powershell
         run: |
-          cd /mnt/d/a/ghostfs/ghostfs
-          TOKEN=$(./build/linux/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1 | grep -oE '[a-f0-9]{32,}')
-          echo "TOKEN=$TOKEN" >> $GITHUB_OUTPUT
-          echo "Token obtained"
+          $output = wsl bash -c 'cd /mnt/d/a/ghostfs/ghostfs && ./build/linux/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1'
+          $token = [regex]::Match($output, '[a-f0-9]{32,}').Value
+          if ($token) {
+            echo "TOKEN=$token" >> $env:GITHUB_OUTPUT
+            Write-Host "Token obtained"
+          } else {
+            Write-Error "Failed to get token: $output"
+            exit 1
+          }
 
       - name: Get WSL IP
         id: wsl-ip
-        shell: wsl-bash {0}
+        shell: powershell
         run: |
-          IP=$(hostname -I | awk '{print $1}')
-          echo "WSL_IP=$IP" >> $GITHUB_OUTPUT
-          echo "WSL IP: $IP"
+          $ip = (wsl hostname -I).Trim().Split()[0]
+          echo "WSL_IP=$ip" >> $env:GITHUB_OUTPUT
+          Write-Host "WSL IP: $ip"
 
       - name: Run E2E Tests
         shell: powershell
