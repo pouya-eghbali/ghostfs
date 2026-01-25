@@ -1,9 +1,13 @@
+// FUSE implementation for Linux and macOS
+#ifndef _WIN32
+
 #define FUSE_USE_VERSION 29
 
 #include <assert.h>
 #include <fcntl.h>
 #include <fuse_lowlevel.h>
 #include <ghostfs/fs.h>
+#include <ghostfs/fs_common.h>
 #include <ghostfs/uuid.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,16 +34,9 @@
 
 #include <mutex>
 
-// Timeout constants (milliseconds)
-constexpr uint64_t CONNECTION_TIMEOUT_MS = 5000;   // 5 seconds for connection
-constexpr uint64_t RPC_TIMEOUT_MS = 30000;         // 30 seconds for RPC calls
-
 // CAPNPROTO
-
 #include <access.capnp.h>
 #include <access.response.capnp.h>
-#include <capnp/message.h>
-#include <capnp/serialize-packed.h>
 #include <create.capnp.h>
 #include <create.response.capnp.h>
 #include <getattr.capnp.h>
@@ -77,12 +74,14 @@ constexpr uint64_t RPC_TIMEOUT_MS = 30000;         // 30 seconds for RPC calls
 #include <write.capnp.h>
 #include <write.response.capnp.h>
 
-uint8_t max_write_back_cache = 8;
-uint8_t max_read_ahead_cache = 8;
+using namespace ghostfs;
 
-// Maximum read-ahead buffer size to prevent memory explosion (16MB)
-constexpr size_t MAX_READ_AHEAD_BYTES = 16 * 1024 * 1024;
+// Global inode mappings (shared with rpc.cpp via extern declarations in fs.h)
+std::map<uint64_t, std::string> ino_to_path;
+std::map<std::string, uint64_t> path_to_ino;
+uint64_t current_ino = 1;
 
+// FUSE-specific cached write structure with fuse_req_t
 struct cached_write {
   fuse_req_t req;
   fuse_ino_t ino;
@@ -92,6 +91,7 @@ struct cached_write {
   struct fuse_file_info fi;  // Store copy, not pointer (stack memory invalid after write returns)
 };
 
+// FUSE-specific cached read structure
 struct cached_read {
   fuse_ino_t ino;
   char *buf;
@@ -100,136 +100,9 @@ struct cached_read {
   struct fuse_file_info *fi;
 };
 
-std::map<uint64_t, std::vector<cached_write>> write_back_cache;
-std::map<uint64_t, cached_read> read_ahead_cache;
-
-// Mutexes for thread-safe cache access
-std::mutex write_cache_mutex;
-std::mutex read_cache_mutex;
-
-std::map<uint64_t, std::string> ino_to_path;
-std::map<std::string, uint64_t> path_to_ino;
-
-uint64_t current_ino = 1;
-
-// Global connection parameters for thread-local client creation
-struct ConnectionParams {
-  std::string host;
-  int port;
-  std::string user;
-  std::string token;
-  std::string cert;
-};
-ConnectionParams g_conn_params;
-
-// Thread-local Cap'n Proto state
-struct ThreadLocalRpc {
-  std::unique_ptr<kj::AsyncIoContext> ioContext;
-  std::unique_ptr<capnp::TwoPartyClient> twoParty;
-  kj::Own<kj::AsyncIoStream> connection;
-  std::optional<GhostFS::Client> client;
-  bool initialized = false;
-
-  kj::Timer& getTimer() {
-    return ioContext->provider->getTimer();
-  }
-
-  void init() {
-    if (initialized) return;
-
-    ioContext = std::make_unique<kj::AsyncIoContext>(kj::setupAsyncIo());
-    auto& timer = ioContext->provider->getTimer();
-
-    if (g_conn_params.cert.length()) {
-      kj::TlsContext::Options options;
-      kj::TlsCertificate caCert(g_conn_params.cert);
-      options.trustedCertificates = kj::arrayPtr(&caCert, 1);
-
-      kj::TlsContext tls(kj::mv(options));
-      auto network = tls.wrapNetwork(ioContext->provider->getNetwork());
-
-      // DNS resolution with timeout
-      auto addressPromise = network->parseAddress(g_conn_params.host, g_conn_params.port);
-      auto addressTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::NetworkAddress> {
-            KJ_FAIL_REQUIRE("DNS resolution timed out");
-          });
-      auto address = addressPromise.exclusiveJoin(kj::mv(addressTimeout))
-          .wait(ioContext->waitScope);
-
-      // TCP connection with timeout
-      auto connectPromise = address->connect();
-      auto connectTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::AsyncIoStream> {
-            KJ_FAIL_REQUIRE("Connection timed out");
-          });
-      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout))
-          .wait(ioContext->waitScope);
-    } else {
-      // DNS resolution with timeout
-      auto addressPromise = ioContext->provider->getNetwork()
-          .parseAddress(g_conn_params.host, g_conn_params.port);
-      auto addressTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::NetworkAddress> {
-            KJ_FAIL_REQUIRE("DNS resolution timed out");
-          });
-      auto address = addressPromise.exclusiveJoin(kj::mv(addressTimeout))
-          .wait(ioContext->waitScope);
-
-      // TCP connection with timeout
-      auto connectPromise = address->connect();
-      auto connectTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::AsyncIoStream> {
-            KJ_FAIL_REQUIRE("Connection timed out");
-          });
-      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout))
-          .wait(ioContext->waitScope);
-    }
-
-    twoParty = std::make_unique<capnp::TwoPartyClient>(*connection);
-    auto rpcCapability = twoParty->bootstrap();
-    auto authClient = rpcCapability.castAs<GhostFSAuth>();
-    auto request = authClient.authRequest();
-    request.setUser(g_conn_params.user);
-    request.setToken(g_conn_params.token);
-
-    // Auth RPC with timeout
-    auto authPromise = request.send();
-    auto authTimeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS)
-        .then([]() -> capnp::Response<GhostFSAuth::AuthResults> {
-          KJ_FAIL_REQUIRE("Authentication timed out");
-        });
-    auto result = authPromise.exclusiveJoin(kj::mv(authTimeout))
-        .wait(ioContext->waitScope);
-
-    if (!result.getAuthSuccess()) {
-      throw std::runtime_error("Thread-local authentication failed");
-    }
-
-    client = result.getGhostFs();
-    initialized = true;
-  }
-};
-
-thread_local ThreadLocalRpc tl_rpc;
-
-// Helper to get thread-local RPC client
-inline ThreadLocalRpc& getRpc() {
-  tl_rpc.init();
-  return tl_rpc;
-}
-
-// Helper for RPC calls with timeout - uses template deduction to avoid explicit type annotations
-template<typename Promise>
-auto waitWithTimeout(Promise&& promise, kj::Timer& timer, kj::WaitScope& waitScope)
-    -> decltype(kj::fwd<Promise>(promise).wait(waitScope)) {
-  using ResultType = decltype(kj::fwd<Promise>(promise).wait(waitScope));
-  auto timeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS)
-      .then([]() -> ResultType {
-        KJ_FAIL_REQUIRE("RPC timeout");
-      });
-  return kj::fwd<Promise>(promise).exclusiveJoin(kj::mv(timeout)).wait(waitScope);
-}
+// FUSE-specific write cache
+std::map<uint64_t, std::vector<cached_write>> fuse_write_back_cache;
+std::map<uint64_t, cached_read> fuse_read_ahead_cache;
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
 
@@ -237,13 +110,10 @@ static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize, of
                              size_t maxsize) {
   if (off < (int64_t)bufsize) {
     return fuse_reply_buf(req, buf + off, min(bufsize - off, maxsize));
-
   } else {
     return fuse_reply_buf(req, NULL, 0);
   }
 }
-
-// Old global Cap'n Proto state removed - now using thread-local storage (tl_rpc)
 
 uint64_t get_parent_ino(uint64_t ino, std::string path) {
   if (ino == 1) {
@@ -265,30 +135,10 @@ template <class T> void fillFileInfo(T *fuseFileInfo, struct fuse_file_info *fi)
   fuseFileInfo->setKeepCache(fi->keep_cache);
   fuseFileInfo->setFlush(fi->flush);
   fuseFileInfo->setNonseekable(fi->nonseekable);
-  /* fuseFileInfo->setCacheReaddir(fi->cache_readdir); */
   fuseFileInfo->setPadding(fi->padding);
   fuseFileInfo->setFh(fi->fh);
   fuseFileInfo->setLockOwner(fi->lock_owner);
-  /* fuseFileInfo->setPollEvents(fi->poll_events); */
-  /* fuseFileInfo->setNoflush(fi->noflush); */
 }
-
-/**
- * Notes: fuse_ino_t is uint64_t
- *        off_t is apparently long int
- *        size_t is apparently unsigned int
- *        fuse_file_info check https://libfuse.github.io/doxygen/structfuse__file__info.html
- *        struct stat check https://pubs.opengroup.org/onlinepubs/7908799/xsh/sysstat.h.html and
- *                          https://doc.rust-lang.org/std/os/linux/raw/struct.stat.html
- *
- * Cool little trick:
- *        gcc -E -xc -include time.h /dev/null | grep time_t
- *        gcc -E -xc -include sys/types.h /dev/null | grep nlink_t
- *
- * Useful stuff:
- *        http://www.sde.cs.titech.ac.jp/~gondow/dwarf2-xml/HTML-rxref/app/gcc-3.3.2/lib/gcc-lib/sparc-sun-solaris2.8/3.3.2/include/sys/types.h.html
- *        Apparently Solaris devs knew how to write non-cryptic code
- */
 
 int ghostfs_stat(fuse_ino_t ino, int64_t fh, struct stat *stbuf) {
   if (fh == 0 || ino == 1) {
@@ -302,7 +152,6 @@ int ghostfs_stat(fuse_ino_t ino, int64_t fh, struct stat *stbuf) {
 
 int ghostfs_stat(fuse_ino_t ino, struct stat *stbuf) {
   if (ino == 1) {
-    // This is the fs root
     stbuf->st_ino = ino;
     stbuf->st_mode = S_IFDIR | 0777;
     stbuf->st_nlink = 2;
@@ -310,7 +159,6 @@ int ghostfs_stat(fuse_ino_t ino, struct stat *stbuf) {
   }
 
   if (not ino_to_path.contains(ino)) {
-    // File is unknown
     return -1;
   }
 
@@ -330,26 +178,6 @@ void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_ino_t i
   fuse_add_direntry(req, b->p + oldsize, b->size - oldsize, name, &stbuf, b->size);
 }
 
-/**
- * @brief
- *
- * @param req
- * @param ino -> uint64_t
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
   try {
     auto &rpc = getRpc();
@@ -384,8 +212,8 @@ static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
     attr.st_ino = attributes.getStIno();
     attr.st_mode = attributes.getStMode();
     attr.st_nlink = attributes.getStNlink();
-    attr.st_uid = geteuid();  // attributes.getStUid();
-    attr.st_gid = getegid();  // attributes.getStGid();
+    attr.st_uid = geteuid();
+    attr.st_gid = getegid();
     attr.st_rdev = attributes.getStRdev();
     attr.st_size = attributes.getStSize();
     attr.st_atime = attributes.getStAtime();
@@ -401,13 +229,6 @@ static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- */
 static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
   try {
     auto &rpc = getRpc();
@@ -447,8 +268,8 @@ static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *nam
     e.attr.st_ino = attributes.getStIno();
     e.attr.st_mode = attributes.getStMode();
     e.attr.st_nlink = attributes.getStNlink();
-    e.attr.st_uid = geteuid();  // attributes.getStUid();
-    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_uid = geteuid();
+    e.attr.st_gid = getegid();
     e.attr.st_rdev = attributes.getStRdev();
     e.attr.st_size = attributes.getStSize();
     e.attr.st_atime = attributes.getStAtime();
@@ -464,28 +285,6 @@ static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *nam
   }
 }
 
-/**
- * @brief Readdir fuse low-level function (called when using ls)
- *
- * @param req
- * @param ino -> uint64_t
- * @param size -> unsigned int
- * @param off -> long int
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                                struct fuse_file_info *fi) {
   try {
@@ -528,26 +327,6 @@ static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param ino -> uint64_t
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
   try {
     auto &rpc = getRpc();
@@ -587,11 +366,11 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
 bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
   std::lock_guard<std::mutex> lock(read_cache_mutex);
 
-  if (not read_ahead_cache.contains(fh)) {
+  if (not fuse_read_ahead_cache.contains(fh)) {
     return false;
   }
 
-  cached_read cache = read_ahead_cache[fh];
+  cached_read cache = fuse_read_ahead_cache[fh];
 
   if (cache.off > off) {
     return false;
@@ -649,13 +428,13 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
     if (static_cast<size_t>(res) > size) {
       std::lock_guard<std::mutex> lock(read_cache_mutex);
 
-      if (read_ahead_cache.contains(fi->fh)) {
-        free(read_ahead_cache[fi->fh].buf);
+      if (fuse_read_ahead_cache.contains(fi->fh)) {
+        free(fuse_read_ahead_cache[fi->fh].buf);
       }
 
       cached_read cache = {ino, (char *)malloc(res), static_cast<size_t>(res), off, fi};
       memcpy(cache.buf, buf, res);
-      read_ahead_cache[fi->fh] = cache;
+      fuse_read_ahead_cache[fi->fh] = cache;
     }
   } catch (const kj::Exception& e) {
     std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
@@ -663,28 +442,6 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param ino -> uint64_t
- * @param size -> unsigned int
- * @param off -> long int
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                             struct fuse_file_info *fi) {
   if (max_read_ahead_cache > 0) {
@@ -736,12 +493,12 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
 uint64_t add_to_write_back_cache(cached_write cache) {
   std::lock_guard<std::mutex> lock(write_cache_mutex);
 
-  if (not write_back_cache.contains(cache.fi.fh)) {
-    write_back_cache[cache.fi.fh] = std::vector<cached_write>();
+  if (not fuse_write_back_cache.contains(cache.fi.fh)) {
+    fuse_write_back_cache[cache.fi.fh] = std::vector<cached_write>();
   }
 
-  write_back_cache[cache.fi.fh].push_back(cache);
-  return write_back_cache[cache.fi.fh].size();
+  fuse_write_back_cache[cache.fi.fh].push_back(cache);
+  return fuse_write_back_cache[cache.fi.fh].size();
 }
 
 void flush_write_back_cache(uint64_t fh, bool reply) {
@@ -751,16 +508,16 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
   {
     std::lock_guard<std::mutex> lock(write_cache_mutex);
 
-    if (not write_back_cache.contains(fh)) {
+    if (not fuse_write_back_cache.contains(fh)) {
       return;
     }
 
-    if (write_back_cache[fh].empty()) {
+    if (fuse_write_back_cache[fh].empty()) {
       return;
     }
 
-    entries_to_flush = std::move(write_back_cache[fh]);
-    write_back_cache.erase(fh);
+    entries_to_flush = std::move(fuse_write_back_cache[fh]);
+    fuse_write_back_cache.erase(fh);
   }
 
   uint64_t cached = entries_to_flush.size();
@@ -814,41 +571,18 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param ino -> uint64_t
- * @param buf -> *char
- * @param size -> unsigned int
- * @param off -> long int
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size,
                              off_t off, struct fuse_file_info *fi) {
   if (max_read_ahead_cache > 0) {
     std::lock_guard<std::mutex> lock(read_cache_mutex);
-    if (read_ahead_cache.contains(fi->fh)) {
-      free(read_ahead_cache[fi->fh].buf);
-      read_ahead_cache.erase(fi->fh);
+    if (fuse_read_ahead_cache.contains(fi->fh)) {
+      free(fuse_read_ahead_cache[fi->fh].buf);
+      fuse_read_ahead_cache.erase(fi->fh);
     }
   }
 
   if (max_write_back_cache > 0) {
-    cached_write cache = {req, ino, (char *)malloc(size), size, off, *fi};  // Copy fi, not pointer
+    cached_write cache = {req, ino, (char *)malloc(size), size, off, *fi};
     memcpy(cache.buf, buf, size);
     uint64_t cached = add_to_write_back_cache(cache);
 
@@ -983,8 +717,8 @@ static void ghostfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
       e.attr.st_ino = attributes.getStIno();
       e.attr.st_mode = attributes.getStMode();
       e.attr.st_nlink = attributes.getStNlink();
-      e.attr.st_uid = geteuid();  // attributes.getStUid();
-      e.attr.st_gid = getegid();  // attributes.getStGid();
+      e.attr.st_uid = geteuid();
+      e.attr.st_gid = getegid();
       e.attr.st_rdev = attributes.getStRdev();
       e.attr.st_size = attributes.getStSize();
       e.attr.st_atime = attributes.getStAtime();
@@ -1001,15 +735,6 @@ static void ghostfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- * @param rdev -> uint16_t
- */
 static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                              dev_t rdev) {
   try {
@@ -1048,8 +773,8 @@ static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name
     e.attr.st_ino = attributes.getStIno();
     e.attr.st_mode = attributes.getStMode();
     e.attr.st_nlink = attributes.getStNlink();
-    e.attr.st_uid = geteuid();  // attributes.getStUid();
-    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_uid = geteuid();
+    e.attr.st_gid = getegid();
     e.attr.st_rdev = attributes.getStRdev();
     e.attr.st_size = attributes.getStSize();
     e.attr.st_atime = attributes.getStAtime();
@@ -1065,13 +790,6 @@ static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param ino -> uint64_t
- * @param mask -> int
- */
 static void ghostfs_ll_access(fuse_req_t req, fuse_ino_t ino, int mask) {
   try {
     auto &rpc = getRpc();
@@ -1100,28 +818,6 @@ static void ghostfs_ll_access(fuse_req_t req, fuse_ino_t ino, int mask) {
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                               struct fuse_file_info *fi) {
   try {
@@ -1166,8 +862,8 @@ static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *nam
     e.attr.st_ino = attributes.getStIno();
     e.attr.st_mode = attributes.getStMode();
     e.attr.st_nlink = attributes.getStNlink();
-    e.attr.st_uid = geteuid();  // attributes.getStUid();
-    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_uid = geteuid();
+    e.attr.st_gid = getegid();
     e.attr.st_rdev = attributes.getStRdev();
     e.attr.st_size = attributes.getStSize();
     e.attr.st_atime = attributes.getStAtime();
@@ -1187,14 +883,6 @@ static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *nam
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- */
 static void ghostfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode) {
   try {
     auto &rpc = getRpc();
@@ -1231,8 +919,8 @@ static void ghostfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name
     e.attr.st_ino = attributes.getStIno();
     e.attr.st_mode = attributes.getStMode();
     e.attr.st_nlink = attributes.getStNlink();
-    e.attr.st_uid = geteuid();  // attributes.getStUid();
-    e.attr.st_gid = getegid();  // attributes.getStGid();
+    e.attr.st_uid = geteuid();
+    e.attr.st_gid = getegid();
     e.attr.st_rdev = attributes.getStRdev();
     e.attr.st_size = attributes.getStSize();
     e.attr.st_atime = attributes.getStAtime();
@@ -1276,14 +964,6 @@ static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- */
 static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
   // Flush any pending writes before releasing the file handle
   flush_write_back_cache(fi->fh, false);
@@ -1313,14 +993,6 @@ static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- */
 static void ghostfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
   flush_write_back_cache(fi->fh, false);
 
@@ -1349,14 +1021,6 @@ static void ghostfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_in
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param parent -> uint64_t
- * @param name -> *char
- * @param mode -> uint64_t
- */
 static void ghostfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                              struct fuse_file_info *fi) {
   flush_write_back_cache(fi->fh, false);
@@ -1388,42 +1052,6 @@ static void ghostfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
   }
 }
 
-/**
- * @brief
- *
- * @param req
- * @param ino -> uint64_t
- * @param attr -> {
- *    uint16_t      st_dev
- *    uint64_t      st_ino
- *    uint64_t      st_mode
- *    uint16_t      st_nlink
- *             int  st_uid
- *             int  st_gid
- *    uint16_t      st_rdev
- *    long     int  st_size
- *    int64_t       st_atime
- *    int64_t       st_mtime
- *    int64_t       st_ctime
- *    uint64_t      st_blksize
- *    uint64_t      st_blocks
- * }
- * @param to_set -> int64_t
- * @param fi -> {
- *             int 	flags
- *    unsigned int 	writepage
- *    unsigned int 	direct_io
- *    unsigned int 	keep_cache
- *    unsigned int 	flush
- *    unsigned int 	nonseekable
- *    unsigned int 	cache_readdir
- *    unsigned int 	padding
- *    uint64_t 	    fh
- *    uint64_t 	    lock_owner
- *    uint32_t 	    poll_events
- *    unsigned int 	noflush
- * }
- */
 static void ghostfs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int to_set,
                                struct fuse_file_info *fi) {
   try {
@@ -1466,6 +1094,7 @@ static void ghostfs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr
       stMtime.setTvSec(attr->st_mtim.tv_sec);
       stMtime.setTvNSec(attr->st_mtim.tv_nsec);
     #endif
+    // clang-format on
 
     fillFileInfo(&fuseFileInfo, fi);
 
@@ -1513,6 +1142,7 @@ static void ghostfs_ll_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name
       fuse_reply_err(req, response.getErrno());
       return;
     }
+    fuse_reply_err(req, 0);
   } catch (const kj::Exception& e) {
     std::cerr << "setxattr error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
@@ -1576,55 +1206,18 @@ static const struct fuse_lowlevel_ops ghostfs_ll_oper = {
 };
 // clang-format on
 
-std::string read_file(const std::string &path);
-
-void free_capnp_resources() {
-  // Thread-local Cap'n Proto resources are cleaned up automatically
-  // when threads exit. Nothing to do here.
-}
-
-void capnpErrorHandler(kj::Exception &e) {
+static void capnpErrorHandler(kj::Exception &e) {
   std::cout << "Error: " << e.getDescription().cStr() << std::endl;
   free_capnp_resources();
   exit(1);
 }
-
-#define CATCH_OWN(TYPE)                                         \
-  [](kj::Exception &&exception) -> kj::Promise<kj::Own<TYPE>> { \
-    capnpErrorHandler(exception);                               \
-    return nullptr;                                             \
-  }
-
-#define CATCH_RESPONSE(TYPE)                                            \
-  [](kj::Exception &&exception) -> kj::Promise<capnp::Response<TYPE>> { \
-    capnpErrorHandler(exception);                                       \
-    return nullptr;                                                     \
-  }
 
 int start_fs(char *executable, char *argmnt, std::vector<std::string> options, std::string host,
              int port, std::string user, std::string token, uint8_t write_back_cache_size,
              uint8_t read_ahead_cache_size, std::string cert_file) {
   kj::_::Debug::setLogLevel(kj::_::Debug::Severity::INFO);
 
-  // Set cache sizes from parameters (now thread-safe with mutex protection)
-  max_write_back_cache = write_back_cache_size;
-  max_read_ahead_cache = read_ahead_cache_size;
-
-  std::string cert = cert_file.length() ? read_file(cert_file) : "";
-
-  // Store connection parameters for thread-local client creation
-  g_conn_params.host = host;
-  g_conn_params.port = port;
-  g_conn_params.user = user;
-  g_conn_params.token = token;
-  g_conn_params.cert = cert;
-
-  // Verify credentials by doing initial authentication on main thread
-  try {
-    (void)getRpc();
-    std::cout << "Connected to the GhostFS server." << std::endl;
-  } catch (const std::exception& e) {
-    std::cout << "Authentication failed: " << e.what() << std::endl;
+  if (!init_connection(host, port, user, token, cert_file, write_back_cache_size, read_ahead_cache_size)) {
     return 1;
   }
 
@@ -1662,7 +1255,6 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
       std::cout << "Mounted the GhostFS endpoint." << std::endl;
       fuse_session_add_chan(se, ch);
       // Use multi-threaded loop to handle concurrent FUSE requests
-      // (needed for following symlinks that point back to the same mount)
       err = fuse_session_loop_mt(se);
       std::cout << "Unmounting GhostFS..." << std::endl;
       fuse_remove_signal_handlers(se);
@@ -1678,3 +1270,5 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
   std::cout << "GhostFS unmounted." << std::endl;
   return err ? 1 : 0;
 }
+
+#endif // !_WIN32

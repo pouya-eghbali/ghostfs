@@ -70,20 +70,45 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g3 -ggdb")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")
 
-# ---- Add FUSE dependencies ----
+# ---- Add platform-specific filesystem dependencies ----
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}
   "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
-find_package(FUSE REQUIRED)
-add_definitions(-D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=29)
-include_directories(${FUSE_INCLUDE_DIR})
+if(WIN32)
+  # Windows: Use WinFSP
+  find_package(WinFSP REQUIRED)
+  add_definitions(-D_WIN32_WINNT=0x0601)  # Windows 7+
+  include_directories(${WINFSP_INCLUDE_DIR})
+  set(PLATFORM_FS_LIBS ${WINFSP_LIBRARY})
+else()
+  # Linux/macOS: Use FUSE
+  find_package(FUSE REQUIRED)
+  add_definitions(-D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=29)
+  include_directories(${FUSE_INCLUDE_DIR})
+  set(PLATFORM_FS_LIBS ${FUSE_LIBRARIES})
+endif()
 
 # ---- Add source files ----
 
 # Note: globbing sources is considered bad practice as CMake's generators may not detect new files
 # automatically. Keep that in mind when changing files, or explicitly mention them here.
 file(GLOB_RECURSE headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
-file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/source/*.cpp")
+
+# Platform-specific source files
+if(WIN32)
+  set(PLATFORM_FS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/source/fs_winfsp.cpp")
+else()
+  set(PLATFORM_FS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/source/fs_fuse.cpp")
+endif()
+
+# Common source files (excluding platform-specific fs implementations)
+set(sources
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/fs_common.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/rpc.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/auth.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/uuid.cpp"
+  ${PLATFORM_FS_SOURCE}
+)
 
 file(GLOB_RECURSE capnp_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/capnp/*.h")
 file(GLOB_RECURSE capnp_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/capnp/*.c++")
@@ -109,7 +134,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::capnp)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::capnp-rpc)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::kj-tls)
-target_link_libraries(${PROJECT_NAME} PUBLIC ${FUSE_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} PUBLIC ${PLATFORM_FS_LIBS})
 
 # uuid_v4 include only on x86
 if(USE_UUID_V4)
@@ -130,10 +155,17 @@ target_include_directories(
   $<INSTALL_INTERFACE:capnp/${PROJECT_NAME}-${PROJECT_VERSION}>
 )
 
-target_include_directories(
-  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${FUSE_INCLUDE_DIR}>
-  $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
-)
+if(WIN32)
+  target_include_directories(
+    ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${WINFSP_INCLUDE_DIR}>
+    $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
+  )
+else()
+  target_include_directories(
+    ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${FUSE_INCLUDE_DIR}>
+    $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
+  )
+endif()
 
 target_include_directories(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${OPENSSL_INCLUDE_DIR}>

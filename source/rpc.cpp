@@ -1,12 +1,15 @@
 #include <errno.h>
 #include <fmt/format.h>
-#include <fuse_lowlevel.h>
 #include <ghostfs/auth.h>
-#include <ghostfs/fs.h>
 #include <ghostfs/rpc.h>
 #include <limits.h>
-#include <sys/xattr.h>
 #include <unistd.h>
+#include <sys/stat.h>
+
+#ifndef _WIN32
+#include <ghostfs/fs.h>
+#include <sys/xattr.h>
+#endif
 
 #include <fstream>
 #include <iostream>

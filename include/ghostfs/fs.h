@@ -1,11 +1,25 @@
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+// Windows: WinFSP implementation
+
+int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
+                     std::string user, std::string token,
+                     uint8_t write_back_cache_size, uint8_t read_ahead_cache_size,
+                     std::string cert_file);
+
+#else
+// Linux/macOS: FUSE implementation
+
 #define FUSE_USE_VERSION 29
 #define _FILE_OFFSET_BITS 64
 
 #include <fuse_lowlevel.h>
-
-#include <map>
-#include <string>
-#include <vector>
 
 int start_fs(char* executable, char* argmnt, std::vector<std::string> options, std::string host,
              int port, std::string user, std::string token, uint8_t write_back_cache_size,
@@ -26,3 +40,5 @@ struct dirbuf {
 void dirbuf_add(fuse_req_t req, struct dirbuf* b, const char* name, fuse_ino_t ino);
 
 uint64_t get_parent_ino(uint64_t ino, std::string path);
+
+#endif // _WIN32

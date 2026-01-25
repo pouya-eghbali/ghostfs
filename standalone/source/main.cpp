@@ -2,7 +2,12 @@
 #include <ghostfs/ghostfs.h>
 #include <ghostfs/rpc.h>
 #include <ghostfs/version.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/resource.h>
+#endif
 
 #include <cxxopts.hpp>
 #include <filesystem>
@@ -13,7 +18,12 @@
 auto main(int argc, char** argv) -> int {
   cxxopts::Options options("GhostFS", "One Ghosty FS");
 
-  std::string default_root = std::filesystem::path(getenv("HOME")) / ".ghostfs" / "root";
+#ifdef _WIN32
+  const char* home_env = getenv("USERPROFILE");
+#else
+  const char* home_env = getenv("HOME");
+#endif
+  std::string default_root = home_env ? (std::filesystem::path(home_env) / ".ghostfs" / "root").string() : ".ghostfs/root";
 
   // clang-format off
   options.add_options()
@@ -61,8 +71,8 @@ auto main(int argc, char** argv) -> int {
   }
 
   if (result["server"].as<bool>()) {
-    // Increse stack size
-
+#ifndef _WIN32
+    // Increase stack size (Unix only)
     const rlim_t min_stack_size = 64 * 1024 * 1024;
     struct rlimit rl;
 
@@ -72,6 +82,7 @@ auto main(int argc, char** argv) -> int {
         setrlimit(RLIMIT_STACK, &rl);
       }
     }
+#endif
 
     std::string root = result["root"].as<std::string>();
     std::string bind = result["bind"].as<std::string>();
@@ -91,21 +102,31 @@ auto main(int argc, char** argv) -> int {
     std::string token = result["token"].as<std::string>();
     std::string cert = result["cert"].as<std::string>();
     std::string mountpoint = result["mountpoint"].as<std::string>();
-    std::vector<std::string> fuse_options;
-    if (result.count("options")) {
-      fuse_options = result["options"].as<std::vector<std::string>>();
-    }
-    int64_t write_back = result["write-back"].as<uint8_t>();
-    int64_t read_ahead = result["read-ahead"].as<uint8_t>();
+    uint8_t write_back = result["write-back"].as<uint8_t>();
+    uint8_t read_ahead = result["read-ahead"].as<uint8_t>();
 
     if (mountpoint.empty()) {
       std::cerr << "Error: mountpoint is required for client mode" << std::endl;
       return 1;
     }
 
+#ifdef _WIN32
+    // Convert mountpoint to wide string for Windows
+    int wsize = MultiByteToWideChar(CP_UTF8, 0, mountpoint.c_str(), -1, nullptr, 0);
+    std::wstring wmountpoint(wsize, 0);
+    MultiByteToWideChar(CP_UTF8, 0, mountpoint.c_str(), -1, &wmountpoint[0], wsize);
+
+    return start_fs_windows(wmountpoint.c_str(), host, port, user, token, write_back, read_ahead, cert);
+#else
+    std::vector<std::string> fuse_options;
+    if (result.count("options")) {
+      fuse_options = result["options"].as<std::vector<std::string>>();
+    }
+
     char* mountpoint_arg = const_cast<char*>(mountpoint.c_str());
     return start_fs(argv[0], mountpoint_arg, fuse_options, host, port, user, token, write_back,
                     read_ahead, cert);
+#endif
 
   } else if (result["authorize"].as<bool>()) {
     uint16_t port = result["auth-port"].as<uint16_t>();
