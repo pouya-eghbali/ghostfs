@@ -20,15 +20,31 @@ jobs:
       - name: Install WinFSP
         shell: powershell
         run: |
-          Write-Host "Installing WinFSP via Chocolatey..."
-          choco install winfsp -y --no-progress
-          Start-Sleep -Seconds 2
+          Write-Host "Downloading WinFSP MSI installer..."
+          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi"
+          $msiPath = "$env:TEMP\winfsp.msi"
+          Invoke-WebRequest -Uri $winfspUrl -OutFile $msiPath -UseBasicParsing
 
+          Write-Host "Installing WinFSP with all components (including kernel driver)..."
+          # ADDLOCAL=ALL ensures kernel driver is installed
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msiPath`" /qn ADDLOCAL=ALL"
+          Start-Sleep -Seconds 3
+
+          # Verify installation
           $found = $false
           foreach ($path in @("C:\Program Files (x86)\WinFsp\inc\winfsp\winfsp.h", "C:\Program Files\WinFsp\inc\winfsp\winfsp.h")) {
             if (Test-Path $path) { $found = $true; break }
           }
           if (-not $found) { Write-Error "WinFSP installation failed"; exit 1 }
+
+          # Check if kernel driver is installed
+          $driverPath = "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.sys"
+          if (Test-Path $driverPath) {
+            Write-Host "WinFSP kernel driver found at: $driverPath"
+          } else {
+            Write-Host "Warning: Kernel driver not found at expected path"
+          }
+
           Write-Host "WinFSP installed successfully"
 
       - name: Setup CMake
