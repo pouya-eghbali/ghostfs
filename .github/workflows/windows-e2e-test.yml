@@ -102,6 +102,29 @@ jobs:
           }
           Write-Host "Client binary found"
 
+          # Check WinFSP installation
+          Write-Host "=== WinFSP Check ==="
+          $winfspDll = "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
+          if (Test-Path $winfspDll) {
+            Write-Host "WinFSP DLL found: $winfspDll"
+          } else {
+            Write-Host "WinFSP DLL not found at expected location"
+            # List WinFsp directory
+            Get-ChildItem "C:\Program Files (x86)\WinFsp\" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+          }
+
+          # Add WinFSP to PATH
+          $env:PATH = "C:\Program Files (x86)\WinFsp\bin;$env:PATH"
+          Write-Host "Added WinFSP bin to PATH"
+
+          # Try running client directly to see error
+          Write-Host "=== Running client directly to see any error messages ==="
+          try {
+            & "build/standalone/Release/GhostFS.exe" --help 2>&1 | Out-String
+          } catch {
+            Write-Host "Error running client: $_"
+          }
+
           # Check server is reachable
           Write-Host "Testing server connectivity..."
           $tcpClient = New-Object System.Net.Sockets.TcpClient
