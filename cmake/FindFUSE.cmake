@@ -11,8 +11,9 @@ if (FUSE_INCLUDE_DIR AND FUSE_LIBRARIES)
 endif ()
 
 if (APPLE)
-    set (FUSE_NAMES libosxfuse.dylib fuse)
-    set (FUSE_SUFFIXES osxfuse fuse)
+    # Support fuse-t (preferred, no kext required), macFUSE, and legacy osxfuse
+    set (FUSE_NAMES fuse-t libosxfuse.dylib fuse)
+    set (FUSE_SUFFIXES fuse osxfuse)
 else ()
     set (FUSE_NAMES fuse refuse)
     set (FUSE_SUFFIXES fuse refuse)
