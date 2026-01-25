@@ -28,6 +28,8 @@
 #include <kj/compat/tls.h>
 #include <kj/threadlocal.h>
 
+#include <mutex>
+
 // CAPNPROTO
 
 #include <access.capnp.h>
@@ -74,6 +76,9 @@
 uint8_t max_write_back_cache = 8;
 uint8_t max_read_ahead_cache = 8;
 
+// Maximum read-ahead buffer size to prevent memory explosion (16MB)
+constexpr size_t MAX_READ_AHEAD_BYTES = 16 * 1024 * 1024;
+
 struct cached_write {
   fuse_req_t req;
   fuse_ino_t ino;
@@ -93,6 +98,10 @@ struct cached_read {
 
 std::map<uint64_t, std::vector<cached_write>> write_back_cache;
 std::map<uint64_t, cached_read> read_ahead_cache;
+
+// Mutexes for thread-safe cache access
+std::mutex write_cache_mutex;
+std::mutex read_cache_mutex;
 
 std::map<uint64_t, std::string> ino_to_path;
 std::map<std::string, uint64_t> path_to_ino;
@@ -528,6 +537,8 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
 }
 
 bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
+  std::lock_guard<std::mutex> lock(read_cache_mutex);
+
   if (not read_ahead_cache.contains(fh)) {
     return false;
   }
@@ -557,8 +568,14 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
   Read::Builder read = request.getReq();
   Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
 
+  // Cap the read-ahead size to prevent memory explosion
+  size_t read_ahead_size = size * max_read_ahead_cache;
+  if (read_ahead_size > MAX_READ_AHEAD_BYTES) {
+    read_ahead_size = MAX_READ_AHEAD_BYTES;
+  }
+
   read.setIno(ino);
-  read.setSize(size * max_read_ahead_cache);
+  read.setSize(read_ahead_size);
   read.setOff(off);
 
   fillFileInfo(&fuseFileInfo, fi);
@@ -584,6 +601,8 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
   fuse_reply_buf(req, buf, min(size, static_cast<size_t>(res)));
 
   if (static_cast<size_t>(res) > size) {
+    std::lock_guard<std::mutex> lock(read_cache_mutex);
+
     if (read_ahead_cache.contains(fi->fh)) {
       free(read_ahead_cache[fi->fh].buf);
     }
@@ -667,6 +686,8 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
 }
 
 uint64_t add_to_write_back_cache(cached_write cache) {
+  std::lock_guard<std::mutex> lock(write_cache_mutex);
+
   if (not write_back_cache.contains(cache.fi->fh)) {
     write_back_cache[cache.fi->fh] = std::vector<cached_write>();
   }
@@ -676,15 +697,25 @@ uint64_t add_to_write_back_cache(cached_write cache) {
 }
 
 void flush_write_back_cache(uint64_t fh, bool reply) {
-  if (not write_back_cache.contains(fh)) {
-    return;
+  std::vector<cached_write> entries_to_flush;
+
+  // Extract entries under lock, then release lock before RPC
+  {
+    std::lock_guard<std::mutex> lock(write_cache_mutex);
+
+    if (not write_back_cache.contains(fh)) {
+      return;
+    }
+
+    if (write_back_cache[fh].empty()) {
+      return;
+    }
+
+    entries_to_flush = std::move(write_back_cache[fh]);
+    write_back_cache.erase(fh);
   }
 
-  uint64_t cached = write_back_cache[fh].size();
-
-  if (cached == 0) {
-    return;
-  }
+  uint64_t cached = entries_to_flush.size();
 
   auto &rpc = getRpc();
   auto &waitScope = rpc.ioContext->waitScope;
@@ -693,7 +724,7 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
   capnp::List<Write>::Builder write = request.initReq(cached);
 
   uint8_t i = 0;
-  for (auto cache : write_back_cache[fh]) {
+  for (auto &cache : entries_to_flush) {
     write[i].setIno(cache.ino);
     write[i].setOff(cache.off);
     write[i].setSize(cache.size);
@@ -714,7 +745,7 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
   if (reply) {
     auto response = result.getRes();
     int res = response[cached - 1].getRes();
-    auto req = write_back_cache[fh][cached - 1].req;
+    auto req = entries_to_flush[cached - 1].req;
 
     if (res == -1) {
       fuse_reply_err(req, response[cached - 1].getErrno());
@@ -723,12 +754,9 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
     }
   }
 
-  for (auto cache : write_back_cache[fh]) {
+  for (auto &cache : entries_to_flush) {
     free(cache.buf);
   }
-
-  write_back_cache[fh].clear();
-  write_back_cache.erase(fh);
 }
 
 /**
@@ -759,7 +787,11 @@ static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, si
   // printf("Called .write\n");
 
   if (max_read_ahead_cache > 0) {
-    read_ahead_cache.erase(fi->fh);
+    std::lock_guard<std::mutex> lock(read_cache_mutex);
+    if (read_ahead_cache.contains(fi->fh)) {
+      free(read_ahead_cache[fi->fh].buf);
+      read_ahead_cache.erase(fi->fh);
+    }
   }
 
   if (max_write_back_cache > 0) {
@@ -1481,15 +1513,9 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
              uint8_t read_ahead_cache_size, std::string cert_file) {
   kj::_::Debug::setLogLevel(kj::_::Debug::Severity::INFO);
 
-  // Disable caching in multi-threaded mode to avoid race conditions.
-  // Multi-threaded FUSE is required to handle symlink re-entry when symlinks
-  // point back to the same mount, but caching with shared state across threads
-  // would require complex synchronization. The performance impact is acceptable
-  // as RPC calls are already the bottleneck.
-  max_write_back_cache = 0;
-  max_read_ahead_cache = 0;
-  (void)write_back_cache_size;  // Unused in multi-threaded mode
-  (void)read_ahead_cache_size;  // Unused in multi-threaded mode
+  // Set cache sizes from parameters (now thread-safe with mutex protection)
+  max_write_back_cache = write_back_cache_size;
+  max_read_ahead_cache = read_ahead_cache_size;
 
   std::string cert = cert_file.length() ? read_file(cert_file) : "";
 

@@ -69,6 +69,7 @@
 #include <filesystem>
 #include <map>
 #include <set>
+#include <vector>
 
 // Global file handle sets per user (shared across all connections for same user)
 // This allows multi-threaded FUSE clients to share file handles across connections
@@ -903,7 +904,8 @@ public:
     size_t size = req.getSize();
     off_t off = req.getOff();
 
-    char buf[size];
+    // Use heap allocation instead of VLA to prevent stack overflow with large reads
+    std::vector<char> buf(size);
     Read::FuseFileInfo::Reader fi = req.getFi();
 
     int64_t fh = fi.getFh();
@@ -915,7 +917,7 @@ public:
     }
 
     ::lseek(fh, off, SEEK_SET);
-    ssize_t res = ::read(fh, &buf, size);
+    ssize_t res = ::read(fh, buf.data(), size);
     uint64_t bytesRead = res > 0 ? res : 0;
 
     int err = errno;
@@ -925,7 +927,7 @@ public:
     //          << ", res: " << res << ", errno: " << err
     //          << ", fh: " << fi.getFh() << std::endl;
 
-    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)buf, bytesRead);
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)buf.data(), bytesRead);
     capnp::Data::Reader buf_reader(buf_ptr);
 
     response.setBuf(buf_reader);
