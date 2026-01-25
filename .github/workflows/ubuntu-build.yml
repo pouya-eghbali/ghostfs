@@ -5,6 +5,8 @@ on:
     branches:
       - master
       - main
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - master
@@ -44,16 +46,15 @@ jobs:
       - name: Build
         run: cmake --build build/standalone -j3
 
-      - name: Make Release Body
-        id: info
-        run: |
-          echo Built from \#`git rev-parse --short HEAD` > release.md
-          echo "tag=linux-${{ matrix.os }}-`git rev-parse --short HEAD`" >> $GITHUB_OUTPUT
+      - name: Rename artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        run: mv build/standalone/GhostFS build/standalone/GhostFS-linux-${{ matrix.os }}
 
       - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "build/standalone/GhostFS"
-          bodyFile: "release.md"
-          prerelease: true
-          tag: ${{ steps.info.outputs.tag }}
+          artifacts: "build/standalone/GhostFS-linux-${{ matrix.os }}"
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true

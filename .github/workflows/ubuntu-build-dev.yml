@@ -41,17 +41,3 @@ jobs:
 
       - name: Build
         run: cmake --build build/standalone -j3
-
-      - name: Make Release Body
-        id: info
-        run: |
-          echo Built from \#`git rev-parse --short HEAD` > release.md
-          echo "tag=linux-${{ matrix.os }}-`git rev-parse --short HEAD`-dev" >> $GITHUB_OUTPUT
-
-      - name: Release
-        uses: ncipollo/release-action@v1
-        with:
-          artifacts: "build/standalone/GhostFS"
-          bodyFile: "release.md"
-          prerelease: true
-          tag: ${{ steps.info.outputs.tag }}
