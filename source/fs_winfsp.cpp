@@ -407,6 +407,8 @@ static NTSTATUS Open(
     PVOID *PFileContext,
     FSP_FSCTL_FILE_INFO *FileInfo) {
 
+  std::cout << "[WinFSP] Open called" << std::endl;
+  std::cout.flush();
   std::string path = normalize_path(FileName);
 
   uint64_t ino;
@@ -1231,11 +1233,15 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
   VolumeParams.CaseSensitiveSearch = 0;
   VolumeParams.CasePreservedNames = 1;
   VolumeParams.UnicodeOnDisk = 1;
-  VolumeParams.PersistentAcls = 0;
+  VolumeParams.PersistentAcls = 1;  // Changed: needed for proper security handling
   VolumeParams.PostCleanupWhenModifiedOnly = 1;
-  VolumeParams.PassQueryDirectoryPattern = 0;
+  VolumeParams.PassQueryDirectoryPattern = 1;  // Changed: pass pattern to ReadDirectory
+  VolumeParams.FlushAndPurgeOnCleanup = 1;  // Added: flush on cleanup
+  VolumeParams.UmFileContextIsUserContext2 = 1;  // Added: we manage file context
   wcscpy_s(VolumeParams.Prefix, sizeof(VolumeParams.Prefix) / sizeof(WCHAR), L"");
   wcscpy_s(VolumeParams.FileSystemName, sizeof(VolumeParams.FileSystemName) / sizeof(WCHAR), L"GhostFS");
+
+  std::cout << "Creating WinFSP filesystem with device: " << FSP_FSCTL_DISK_DEVICE_NAME << std::endl;
 
   NTSTATUS Result = FspFileSystemCreate(
     const_cast<PWSTR>(L"" FSP_FSCTL_DISK_DEVICE_NAME),
@@ -1243,21 +1249,33 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
     &GhostFSInterface,
     &g_FileSystem);
 
+  std::cout << "FspFileSystemCreate result: 0x" << std::hex << Result << std::dec << std::endl;
+
   if (!NT_SUCCESS(Result)) {
-    std::cerr << "Failed to create WinFSP filesystem: " << Result << std::endl;
+    std::cerr << "Failed to create WinFSP filesystem: 0x" << std::hex << Result << std::dec << std::endl;
     return 1;
   }
 
+  // Enable debug logging
+  FspFileSystemSetDebugLog(g_FileSystem, (UINT32)-1);
+  std::cout << "Debug logging enabled" << std::endl;
+
+  std::wcout << L"Setting mount point: " << mountpoint << std::endl;
   Result = FspFileSystemSetMountPoint(g_FileSystem, const_cast<PWSTR>(mountpoint));
+  std::cout << "FspFileSystemSetMountPoint result: 0x" << std::hex << Result << std::dec << std::endl;
+
   if (!NT_SUCCESS(Result)) {
-    std::cerr << "Failed to set mount point: " << Result << std::endl;
+    std::cerr << "Failed to set mount point: 0x" << std::hex << Result << std::dec << std::endl;
     FspFileSystemDelete(g_FileSystem);
     return 1;
   }
 
+  std::cout << "Starting dispatcher..." << std::endl;
   Result = FspFileSystemStartDispatcher(g_FileSystem, 0);
+  std::cout << "FspFileSystemStartDispatcher result: 0x" << std::hex << Result << std::dec << std::endl;
+
   if (!NT_SUCCESS(Result)) {
-    std::cerr << "Failed to start WinFSP dispatcher: " << Result << std::endl;
+    std::cerr << "Failed to start WinFSP dispatcher: 0x" << std::hex << Result << std::dec << std::endl;
     FspFileSystemDelete(g_FileSystem);
     return 1;
   }
