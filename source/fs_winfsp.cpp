@@ -240,6 +240,7 @@ static NTSTATUS GetSecurityByName(
     PSECURITY_DESCRIPTOR SecurityDescriptor,
     SIZE_T *PSecurityDescriptorSize) {
 
+  std::wcerr << L"[WinFSP] GetSecurityByName called: " << (FileName ? FileName : L"(null)") << std::endl;
   std::string path = normalize_path(FileName);
 
   uint64_t ino;
@@ -290,6 +291,7 @@ static NTSTATUS Create(
     PVOID *PFileContext,
     FSP_FSCTL_FILE_INFO *FileInfo) {
 
+  std::wcerr << L"[WinFSP] Create called: " << (FileName ? FileName : L"(null)") << std::endl;
   std::string path = normalize_path(FileName);
   bool is_directory = (CreateOptions & FILE_DIRECTORY_FILE) != 0;
 
@@ -1028,6 +1030,17 @@ static int run_internal_tests(const std::wstring& mount_root) {
   if (root.back() != L'\\') root += L'\\';
 
   std::wcout << L"Test root: " << root << std::endl;
+
+  // Check if drive is accessible
+  DWORD attr = GetFileAttributesW(root.c_str());
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    std::cout << "ERROR: Cannot access mount root (error " << GetLastError() << ")" << std::endl;
+    std::cout << "Checking drive type..." << std::endl;
+    UINT driveType = GetDriveTypeW(root.c_str());
+    std::cout << "Drive type: " << driveType << " (0=unknown, 1=no_root, 2=removable, 3=fixed, 4=remote, 5=cdrom, 6=ramdisk)" << std::endl;
+    return 1;
+  }
+  std::cout << "Mount root is accessible (attributes: " << attr << ")" << std::endl;
 
   // Test 1: Create file
   {
