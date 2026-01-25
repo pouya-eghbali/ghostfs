@@ -1664,6 +1664,7 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
       // Use multi-threaded loop to handle concurrent FUSE requests
       // (needed for following symlinks that point back to the same mount)
       err = fuse_session_loop_mt(se);
+      std::cout << "Unmounting GhostFS..." << std::endl;
       fuse_remove_signal_handlers(se);
       fuse_session_remove_chan(ch);
     }
@@ -1674,5 +1675,6 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
   fuse_opt_free_args(&args);
   free_capnp_resources();
 
+  std::cout << "GhostFS unmounted." << std::endl;
   return err ? 1 : 0;
 }
