@@ -1,0 +1,291 @@
+name: Windows E2E Tests
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  # Build Linux server binary for E2E tests
+  build-linux-server:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libssl-dev zlib1g-dev cmake g++
+
+      - name: Build Linux binary
+        run: |
+          cmake -S standalone -B build/standalone -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/standalone -j$(nproc)
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostFS-Linux-x64
+          path: build/standalone/GhostFS
+          if-no-files-found: error
+          retention-days: 1
+
+  # Build Windows client and run E2E tests
+  e2e-test:
+    runs-on: windows-2022
+    needs: build-linux-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: GhostFS-Linux-x64
+          path: ./linux-bin
+
+      - name: Install WinFSP
+        shell: powershell
+        run: |
+          Write-Host "Installing WinFSP via Chocolatey..."
+          choco install winfsp -y --no-progress
+          Start-Sleep -Seconds 2
+
+          # Verify DLL exists
+          $dllPaths = @(
+            "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll",
+            "C:\Program Files\WinFsp\bin\winfsp-x64.dll"
+          )
+
+          $found = $false
+          foreach ($path in $dllPaths) {
+            if (Test-Path $path) {
+              Write-Host "WinFSP runtime found at: $path"
+              $found = $true
+              break
+            }
+          }
+
+          if (-not $found) {
+            Write-Error "WinFSP installation failed"
+            exit 1
+          }
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Build Windows client
+        shell: cmd
+        run: |
+          cmake -S standalone -B build/standalone -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DWINFSP_PATH="C:/Program Files (x86)/WinFsp"
+          cmake --build build/standalone --config Release -j %NUMBER_OF_PROCESSORS%
+
+      - name: Setup WSL2 with Ubuntu
+        shell: powershell
+        run: |
+          wsl --install -d Ubuntu-22.04 --no-launch
+          wsl --set-default-version 2
+          ubuntu2204.exe install --root
+          wsl -d Ubuntu-22.04 -- echo "WSL2 Ubuntu is ready"
+
+      - name: Install FUSE in WSL
+        shell: powershell
+        run: |
+          wsl -d Ubuntu-22.04 -- bash -c "apt-get update && apt-get install -y fuse libfuse2"
+
+      - name: Setup server in WSL
+        shell: powershell
+        run: |
+          wsl -d Ubuntu-22.04 -- mkdir -p /app /data/root/testuser
+          Copy-Item "./linux-bin/GhostFS" -Destination "\\wsl$\Ubuntu-22.04\app\GhostFS"
+          wsl -d Ubuntu-22.04 -- chmod +x /app/GhostFS
+
+      - name: Start Linux server in WSL
+        shell: powershell
+        run: |
+          wsl -d Ubuntu-22.04 -- bash -c "nohup /app/GhostFS --server --root /data/root --bind 0.0.0.0 --port 3444 --auth-port 3445 > /tmp/server.log 2>&1 &"
+          Start-Sleep -Seconds 3
+
+          $serverRunning = wsl -d Ubuntu-22.04 -- pgrep -f "GhostFS.*--server"
+          if ($serverRunning) {
+            Write-Host "Server started (PID: $serverRunning)"
+          } else {
+            wsl -d Ubuntu-22.04 -- cat /tmp/server.log
+            Write-Error "Server failed to start"
+            exit 1
+          }
+
+      - name: Create test user token
+        id: auth
+        shell: powershell
+        run: |
+          $output = wsl -d Ubuntu-22.04 -- /app/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1
+          $token = [regex]::Match($output, '[a-f0-9]{32,}').Value
+          if ($token) {
+            Write-Host "Got token: $token"
+            echo "TOKEN=$token" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "Failed to get authentication token"
+            exit 1
+          }
+
+      - name: Get WSL IP address
+        id: wsl-ip
+        shell: powershell
+        run: |
+          $wslIp = wsl -d Ubuntu-22.04 -- hostname -I | ForEach-Object { $_.Trim().Split()[0] }
+          Write-Host "WSL IP: $wslIp"
+          echo "WSL_IP=$wslIp" >> $env:GITHUB_OUTPUT
+
+      - name: Run E2E Tests
+        shell: powershell
+        env:
+          TOKEN: ${{ steps.auth.outputs.TOKEN }}
+          WSL_IP: ${{ steps.wsl-ip.outputs.WSL_IP }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $testsPassed = 0
+          $testsFailed = 0
+
+          function Log-Pass($msg) { Write-Host "[PASS] $msg" -ForegroundColor Green; $script:testsPassed++ }
+          function Log-Fail($msg) { Write-Host "[FAIL] $msg" -ForegroundColor Red; $script:testsFailed++ }
+          function Log-Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Yellow }
+
+          # Start Windows client
+          Log-Info "Starting GhostFS Windows client..."
+          $clientProcess = Start-Process -FilePath "build/standalone/Release/GhostFS.exe" `
+            -ArgumentList "--client --host $env:WSL_IP --port 3444 -u testuser -t $env:TOKEN G:" `
+            -PassThru -NoNewWindow -RedirectStandardOutput "client-stdout.log" -RedirectStandardError "client-stderr.log"
+
+          Start-Sleep -Seconds 5
+
+          if (-not (Test-Path "G:\")) {
+            Get-Content "client-stdout.log" -ErrorAction SilentlyContinue
+            Get-Content "client-stderr.log" -ErrorAction SilentlyContinue
+            Write-Error "Failed to mount GhostFS on G:"
+            exit 1
+          }
+
+          Log-Info "GhostFS mounted on G:"
+
+          # Test 1: Create file
+          try {
+            Set-Content -Path "G:\test_create.txt" -Value "Hello from Windows!"
+            if (Test-Path "G:\test_create.txt") { Log-Pass "Create file" }
+            else { Log-Fail "Create file - not found" }
+          } catch { Log-Fail "Create file - $_" }
+
+          # Test 2: Read file
+          try {
+            Set-Content -Path "G:\test_read.txt" -Value "Test content"
+            $content = Get-Content -Path "G:\test_read.txt" -Raw
+            if ($content.Trim() -eq "Test content") { Log-Pass "Read file" }
+            else { Log-Fail "Read file - mismatch" }
+          } catch { Log-Fail "Read file - $_" }
+
+          # Test 3: Create directory
+          try {
+            New-Item -ItemType Directory -Path "G:\test_dir" -Force | Out-Null
+            if (Test-Path "G:\test_dir" -PathType Container) { Log-Pass "Create directory" }
+            else { Log-Fail "Create directory - not found" }
+          } catch { Log-Fail "Create directory - $_" }
+
+          # Test 4: List directory
+          try {
+            New-Item -ItemType Directory -Path "G:\test_listdir" -Force | Out-Null
+            1..3 | ForEach-Object { Set-Content -Path "G:\test_listdir\file$_.txt" -Value "content" }
+            $count = (Get-ChildItem "G:\test_listdir").Count
+            if ($count -eq 3) { Log-Pass "List directory" }
+            else { Log-Fail "List directory - expected 3, got $count" }
+          } catch { Log-Fail "List directory - $_" }
+
+          # Test 5: Delete file
+          try {
+            Set-Content -Path "G:\test_delete.txt" -Value "delete me"
+            Remove-Item "G:\test_delete.txt"
+            if (-not (Test-Path "G:\test_delete.txt")) { Log-Pass "Delete file" }
+            else { Log-Fail "Delete file - still exists" }
+          } catch { Log-Fail "Delete file - $_" }
+
+          # Test 6: Rename file
+          try {
+            Set-Content -Path "G:\test_rename_old.txt" -Value "rename test"
+            Move-Item "G:\test_rename_old.txt" "G:\test_rename_new.txt"
+            if ((-not (Test-Path "G:\test_rename_old.txt")) -and (Test-Path "G:\test_rename_new.txt")) {
+              Log-Pass "Rename file"
+            } else { Log-Fail "Rename file - failed" }
+          } catch { Log-Fail "Rename file - $_" }
+
+          # Test 7: Nested directories
+          try {
+            New-Item -ItemType Directory -Path "G:\level1\level2\level3" -Force | Out-Null
+            Set-Content -Path "G:\level1\level2\level3\deep.txt" -Value "deep content"
+            if (Test-Path "G:\level1\level2\level3\deep.txt") { Log-Pass "Nested directories" }
+            else { Log-Fail "Nested directories - not found" }
+          } catch { Log-Fail "Nested directories - $_" }
+
+          # Test 8: Large file (1MB)
+          try {
+            $bytes = New-Object byte[] (1MB)
+            [System.Random]::new().NextBytes($bytes)
+            [System.IO.File]::WriteAllBytes("G:\test_large.bin", $bytes)
+            $size = (Get-Item "G:\test_large.bin").Length
+            if ($size -eq 1MB) { Log-Pass "Large file (1MB)" }
+            else { Log-Fail "Large file - size $size" }
+          } catch { Log-Fail "Large file - $_" }
+
+          # Test 9: Binary integrity
+          try {
+            $bytes = New-Object byte[] (512KB)
+            [System.Random]::new(42).NextBytes($bytes)
+            [System.IO.File]::WriteAllBytes("G:\test_integrity.bin", $bytes)
+            $readBytes = [System.IO.File]::ReadAllBytes("G:\test_integrity.bin")
+            $match = ($bytes.Length -eq $readBytes.Length)
+            if ($match) {
+              for ($i = 0; $i -lt $bytes.Length; $i++) {
+                if ($bytes[$i] -ne $readBytes[$i]) { $match = $false; break }
+              }
+            }
+            if ($match) { Log-Pass "Binary integrity (512KB)" }
+            else { Log-Fail "Binary integrity - mismatch" }
+          } catch { Log-Fail "Binary integrity - $_" }
+
+          # Summary
+          Write-Host ""
+          Write-Host "============================================"
+          Write-Host "Tests passed: $testsPassed" -ForegroundColor Green
+          Write-Host "Tests failed: $testsFailed" -ForegroundColor Red
+          Write-Host "============================================"
+
+          # Cleanup
+          if ($clientProcess -and !$clientProcess.HasExited) {
+            Stop-Process -Id $clientProcess.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          if ($testsFailed -gt 0) { exit 1 }
+
+      - name: Collect logs on failure
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Host "=== Windows Client stdout ==="
+          Get-Content "client-stdout.log" -ErrorAction SilentlyContinue
+          Write-Host "=== Windows Client stderr ==="
+          Get-Content "client-stderr.log" -ErrorAction SilentlyContinue
+          Write-Host "=== Linux Server log ==="
+          wsl -d Ubuntu-22.04 -- cat /tmp/server.log 2>$null
+
+      - name: Cleanup
+        if: always()
+        shell: powershell
+        run: |
+          Get-Process -Name "GhostFS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          wsl -d Ubuntu-22.04 -- pkill -f "GhostFS" 2>$null
