@@ -78,9 +78,10 @@ if [ -z "$TOKEN" ]; then
 fi
 log_info "Got token: $TOKEN"
 
-# Mount the filesystem
+# Mount the filesystem with large cache settings for integrity testing
 log_info "Mounting GhostFS client..."
-ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" "$MOUNT" &
+ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
+    --write-back 32 --read-ahead 32 "$MOUNT" &
 CLIENT_PID=$!
 sleep 2
 
@@ -342,6 +343,59 @@ test_overwrite_file() {
     fi
 }
 
+# Test 16: Large file integrity with hash verification (32MB)
+# Tests readahead/writeback cache integrity by:
+# 1. Creating a random file locally
+# 2. Copying to GhostFS and verifying hash
+# 3. Copying back from GhostFS and verifying hash
+test_large_file_integrity() {
+    local size_mb=32
+    local local_original="/tmp/test_integrity_original.bin"
+    local ghostfs_file="$MOUNT/test_integrity.bin"
+    local local_copy="/tmp/test_integrity_copy.bin"
+
+    log_info "Creating ${size_mb}MB random file for integrity test..."
+
+    # Create random file locally
+    dd if=/dev/urandom of="$local_original" bs=1M count=$size_mb 2>/dev/null
+
+    # Calculate hash of original
+    local hash_original=$(sha256sum "$local_original" | cut -d' ' -f1)
+    log_info "Original hash: $hash_original"
+
+    # Copy to GhostFS
+    log_info "Copying to GhostFS..."
+    cp "$local_original" "$ghostfs_file"
+
+    # Sync to ensure all writes are flushed
+    sync
+
+    # Calculate hash of file on GhostFS
+    local hash_ghostfs=$(sha256sum "$ghostfs_file" | cut -d' ' -f1)
+    log_info "GhostFS hash: $hash_ghostfs"
+
+    # Copy back from GhostFS
+    log_info "Copying back from GhostFS..."
+    cp "$ghostfs_file" "$local_copy"
+
+    # Calculate hash of copied file
+    local hash_copy=$(sha256sum "$local_copy" | cut -d' ' -f1)
+    log_info "Copy hash: $hash_copy"
+
+    # Clean up temp files
+    rm -f "$local_original" "$local_copy"
+
+    # Verify all hashes match
+    if [ "$hash_original" = "$hash_ghostfs" ] && [ "$hash_ghostfs" = "$hash_copy" ]; then
+        log_pass "Large file integrity (${size_mb}MB, SHA256 verified)"
+    else
+        log_fail "Large file integrity - hash mismatch:"
+        log_fail "  Original: $hash_original"
+        log_fail "  GhostFS:  $hash_ghostfs"
+        log_fail "  Copy:     $hash_copy"
+    fi
+}
+
 # Run all tests (disable set -e so test failures don't abort)
 set +e
 test_create_file
@@ -359,6 +413,7 @@ test_nested_directories
 test_file_stat
 test_concurrent_writes
 test_overwrite_file
+test_large_file_integrity
 set -e
 
 # ============================================================================
