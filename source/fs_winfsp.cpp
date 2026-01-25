@@ -240,7 +240,8 @@ static NTSTATUS GetSecurityByName(
     PSECURITY_DESCRIPTOR SecurityDescriptor,
     SIZE_T *PSecurityDescriptorSize) {
 
-  std::wcerr << L"[WinFSP] GetSecurityByName called: " << (FileName ? FileName : L"(null)") << std::endl;
+  std::cout << "[WinFSP] GetSecurityByName called" << std::endl;
+  std::cout.flush();
   std::string path = normalize_path(FileName);
 
   uint64_t ino;
@@ -291,7 +292,8 @@ static NTSTATUS Create(
     PVOID *PFileContext,
     FSP_FSCTL_FILE_INFO *FileInfo) {
 
-  std::wcerr << L"[WinFSP] Create called: " << (FileName ? FileName : L"(null)") << std::endl;
+  std::cout << "[WinFSP] Create called" << std::endl;
+  std::cout.flush();
   std::string path = normalize_path(FileName);
   bool is_directory = (CreateOptions & FILE_DIRECTORY_FILE) != 0;
 
@@ -1282,6 +1284,28 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
     DWORD driveType = GetDriveTypeW(driveRoot.c_str());
     std::wcout << L"Drive type for " << driveRoot << L": " << driveType << std::endl;
     std::cout << "(0=unknown, 1=no_root, 2=removable, 3=fixed, 4=remote, 5=cdrom, 6=ramdisk)" << std::endl;
+
+    // Try a simple test directly from main thread first
+    std::cout << "Testing GetFileAttributesW from main thread..." << std::endl;
+    DWORD attr = GetFileAttributesW(driveRoot.c_str());
+    std::cout << "Result: " << attr << " (error: " << GetLastError() << ")" << std::endl;
+
+    // Also try opening a handle directly
+    std::cout << "Testing CreateFileW on root..." << std::endl;
+    HANDLE hRoot = CreateFileW(
+        driveRoot.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,  // Needed for directories
+        nullptr);
+    if (hRoot != INVALID_HANDLE_VALUE) {
+      std::cout << "Root handle opened successfully!" << std::endl;
+      CloseHandle(hRoot);
+    } else {
+      std::cout << "Failed to open root (error: " << GetLastError() << ")" << std::endl;
+    }
 
     // Run tests in a separate thread to avoid blocking dispatcher
     std::wstring mp(mountpoint);
