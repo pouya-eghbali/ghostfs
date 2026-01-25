@@ -85,19 +85,10 @@ jobs:
             exit 1
           }
 
-      - name: Get WSL IP
-        id: wsl-ip
-        shell: powershell
-        run: |
-          $ip = (wsl hostname -I).Trim().Split()[0]
-          echo "WSL_IP=$ip" >> $env:GITHUB_OUTPUT
-          Write-Host "WSL IP: $ip"
-
       - name: Run E2E Tests
         shell: powershell
         env:
           TOKEN: ${{ steps.auth.outputs.TOKEN }}
-          WSL_IP: ${{ steps.wsl-ip.outputs.WSL_IP }}
         run: |
           $ErrorActionPreference = "Continue"
           $passed = 0; $failed = 0
@@ -105,10 +96,10 @@ jobs:
           function Pass($m) { Write-Host "[PASS] $m" -ForegroundColor Green; $script:passed++ }
           function Fail($m) { Write-Host "[FAIL] $m" -ForegroundColor Red; $script:failed++ }
 
-          # Start client
+          # Start client (use localhost - WSL 2 forwards ports)
           Write-Host "Starting Windows client..."
           $client = Start-Process -FilePath "build/standalone/Release/GhostFS.exe" `
-            -ArgumentList "--client --host $env:WSL_IP --port 3444 -u testuser -t $env:TOKEN G:" `
+            -ArgumentList "--client --host localhost --port 3444 -u testuser -t $env:TOKEN G:" `
             -PassThru -NoNewWindow -RedirectStandardOutput "client.log" -RedirectStandardError "client-err.log"
 
           Start-Sleep -Seconds 5
