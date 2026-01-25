@@ -70,6 +70,15 @@ using namespace ghostfs;
 #define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 #define S_IWUSR  0200
 
+// POSIX open flags (for compatibility with server)
+#define O_RDONLY 0x0000
+#define O_WRONLY 0x0001
+#define O_RDWR   0x0002
+#define O_CREAT  0x0040
+
+// FUSE setattr flags
+#define FUSE_SET_ATTR_SIZE 8
+
 // File context for each open file
 struct GhostFSFileContext {
   uint64_t ino;
@@ -764,9 +773,6 @@ static NTSTATUS SetFileSize(
   }
 }
 
-// FUSE setattr flags
-#define FUSE_SET_ATTR_SIZE 8
-
 static NTSTATUS CanDelete(
     FSP_FILE_SYSTEM *FileSystem,
     PVOID FileContext,
@@ -836,12 +842,13 @@ static NTSTATUS Rename(
   }
 }
 
-static NTSTATUS Cleanup(
+static VOID Cleanup(
     FSP_FILE_SYSTEM *FileSystem,
     PVOID FileContext,
     PWSTR FileName,
     ULONG Flags) {
 
+  (void)FileSystem;
   GhostFSFileContext *ctx = (GhostFSFileContext *)FileContext;
 
   if (Flags & FspCleanupDelete) {
@@ -879,8 +886,6 @@ static NTSTATUS Cleanup(
       std::cerr << "Cleanup delete error: " << e.getDescription().cStr() << std::endl;
     }
   }
-
-  return;
 }
 
 static NTSTATUS ReadDirectory(
@@ -980,26 +985,29 @@ static NTSTATUS ReadDirectory(
 
 // WinFSP interface table
 static FSP_FILE_SYSTEM_INTERFACE GhostFSInterface = {
-  .GetVolumeInfo = GetVolumeInfo,
-  .SetVolumeLabel_ = nullptr,
-  .GetSecurityByName = GetSecurityByName,
-  .Create = Create,
-  .Open = Open,
-  .Overwrite = nullptr,
-  .Cleanup = Cleanup,
-  .Close = Close,
-  .Read = Read,
-  .Write = Write,
-  .Flush = Flush,
-  .GetFileInfo = GetFileInfo,
-  .SetBasicInfo = SetBasicInfo,
-  .SetFileSize = SetFileSize,
-  .CanDelete = CanDelete,
-  .Rename = Rename,
-  .GetSecurity = nullptr,
-  .SetSecurity = nullptr,
-  .ReadDirectory = ReadDirectory,
+  GetVolumeInfo,          // GetVolumeInfo
+  nullptr,                // SetVolumeLabel
+  GetSecurityByName,      // GetSecurityByName
+  Create,                 // Create
+  Open,                   // Open
+  nullptr,                // Overwrite
+  Cleanup,                // Cleanup
+  Close,                  // Close
+  Read,                   // Read
+  Write,                  // Write
+  Flush,                  // Flush
+  GetFileInfo,            // GetFileInfo
+  SetBasicInfo,           // SetBasicInfo
+  SetFileSize,            // SetFileSize
+  CanDelete,              // CanDelete
+  Rename,                 // Rename
+  nullptr,                // GetSecurity
+  nullptr,                // SetSecurity
+  ReadDirectory,          // ReadDirectory
 };
+
+// Global stop flag for dispatcher
+static volatile LONG g_StopDispatcher = 0;
 
 int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
                      std::string user, std::string token,
@@ -1056,9 +1064,13 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
   std::wcout << L"Mounted GhostFS at " << mountpoint << std::endl;
   std::cout << "Press Ctrl+C to unmount..." << std::endl;
 
+  // Reset stop flag
+  InterlockedExchange(&g_StopDispatcher, 0);
+
   // Wait for termination signal
   SetConsoleCtrlHandler([](DWORD dwCtrlType) -> BOOL {
     if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT) {
+      InterlockedExchange(&g_StopDispatcher, 1);
       if (g_FileSystem) {
         FspFileSystemStopDispatcher(g_FileSystem);
       }
@@ -1067,8 +1079,8 @@ int start_fs_windows(const wchar_t* mountpoint, std::string host, int port,
     return FALSE;
   }, TRUE);
 
-  // Wait until dispatcher stops
-  while (FspFileSystemDispatcherStopped(g_FileSystem) == 0) {
+  // Wait until stop signal
+  while (InterlockedCompareExchange(&g_StopDispatcher, 0, 0) == 0) {
     Sleep(1000);
   }
 

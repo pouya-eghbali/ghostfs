@@ -105,16 +105,20 @@ file(GLOB_RECURSE headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include
 # Platform-specific source files
 if(WIN32)
   set(PLATFORM_FS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/source/fs_winfsp.cpp")
+  # Windows only builds the client, not the server
+  set(PLATFORM_RPC_SOURCE "")
 else()
   set(PLATFORM_FS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/source/fs_fuse.cpp")
+  # Linux/macOS builds both client and server
+  set(PLATFORM_RPC_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/source/rpc.cpp")
 endif()
 
 # Common source files (excluding platform-specific fs implementations)
 set(sources
   "${CMAKE_CURRENT_SOURCE_DIR}/source/fs_common.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/source/rpc.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/source/auth.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/source/uuid.cpp"
+  ${PLATFORM_RPC_SOURCE}
   ${PLATFORM_FS_SOURCE}
 )
 
