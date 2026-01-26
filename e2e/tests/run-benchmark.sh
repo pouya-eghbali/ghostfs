@@ -82,6 +82,18 @@ calc_throughput() {
     fi
 }
 
+# Tune network parameters for better throughput
+tune_network() {
+    log_info "Tuning network parameters..."
+    # Increase TCP buffer sizes
+    sysctl -w net.core.rmem_max=16777216 2>/dev/null || true
+    sysctl -w net.core.wmem_max=16777216 2>/dev/null || true
+    sysctl -w net.ipv4.tcp_rmem="4096 1048576 16777216" 2>/dev/null || true
+    sysctl -w net.ipv4.tcp_wmem="4096 1048576 16777216" 2>/dev/null || true
+    # Disable Nagle's algorithm effect
+    sysctl -w net.ipv4.tcp_low_latency=1 2>/dev/null || true
+}
+
 # Mount filesystem with specific cache size
 mount_with_cache() {
     local cache_size=$1
@@ -92,8 +104,14 @@ mount_with_cache() {
         sleep 1
     fi
 
+    # FUSE options for better performance:
+    # - big_writes: enable large write requests
+    # - max_read/max_write: increase max I/O size to 1MB
+    # - async_read: async read operations
     ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
-        --write-back "$cache_size" --read-ahead "$cache_size" "$MOUNT" &
+        --write-back "$cache_size" --read-ahead "$cache_size" \
+        -o big_writes -o max_read=1048576 -o max_write=1048576 -o async_read \
+        "$MOUNT" &
     sleep 2
 
     if ! mountpoint -q "$MOUNT"; then
@@ -107,6 +125,9 @@ mount_with_cache() {
 log_info "Setting up benchmark environment..."
 mkdir -p "$ROOT/$USER"
 mkdir -p "$MOUNT"
+
+# Apply network tuning
+tune_network
 
 # Start the server in background
 log_info "Starting GhostFS server..."
