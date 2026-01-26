@@ -1,0 +1,64 @@
+name: Build CSI Driver
+
+on:
+  push:
+    branches:
+      - master
+      - main
+      - 'feature/csi*'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+      - main
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: "**/cpm_modules"
+          key: ${{ github.workflow }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}
+
+      - name: Set up GCC
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: latest
+          platform: x64
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev zlib1g-dev
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev
+          sudo apt-get install -y libgrpc++-dev libgrpc-dev protobuf-compiler-grpc
+
+      - name: Configure with CSI support
+        run: cmake -S standalone -B build/standalone -DGHOSTFS_CSI_SUPPORT=ON
+
+      - name: Build
+        run: cmake --build build/standalone -j3
+
+      - name: Verify CSI option
+        run: ./build/standalone/GhostFS --help | grep -i csi
+
+      - name: Rename artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        run: mv build/standalone/GhostFS build/standalone/GhostFS-linux-csi
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "build/standalone/GhostFS-linux-csi"
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true

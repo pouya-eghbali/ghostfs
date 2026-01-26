@@ -1,0 +1,80 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: ghostfs.csi.k8s.io
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  volumeLifecycleModes:
+    - Persistent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ghostfs-csi-node
+  namespace: kube-system
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ghostfs-csi-node
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: ghostfs-csi-node
+  template:
+    metadata:
+      labels:
+        app: ghostfs-csi-node
+    spec:
+      serviceAccountName: ghostfs-csi-node
+      hostNetwork: true
+      containers:
+        - name: csi-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--kubelet-registration-path=/var/lib/kubelet/plugins/ghostfs.csi.k8s.io/csi.sock"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+
+        - name: ghostfs-csi
+          image: ghostfs/ghostfs-csi:latest  # Replace with your image
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+          args:
+            - "--csi"
+            - "--csi-socket=/csi/csi.sock"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: fuse-device
+              mountPath: /dev/fuse
+
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/ghostfs.csi.k8s.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: fuse-device
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice

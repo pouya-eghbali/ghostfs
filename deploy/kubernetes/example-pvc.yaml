@@ -1,0 +1,60 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ghostfs
+provisioner: ghostfs.csi.k8s.io
+volumeBindingMode: Immediate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ghostfs-pv
+spec:
+  capacity:
+    storage: 100Gi  # GhostFS doesn't enforce quotas; this is informational
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ghostfs
+  csi:
+    driver: ghostfs.csi.k8s.io
+    volumeHandle: ghostfs-vol-1
+    volumeAttributes:
+      host: "ghostfs-server.default.svc.cluster.local"  # Your GhostFS server
+      port: "3444"
+      user: "myuser"
+      token: "mytoken"  # Consider using a Secret instead
+      # cert: "/path/to/cert.pem"  # Optional TLS cert
+      # writeBack: "8"  # Write-back cache size
+      # readAhead: "8"  # Read-ahead cache size
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ghostfs-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ghostfs
+  resources:
+    requests:
+      storage: 100Gi
+---
+# Example pod using the PVC
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ghostfs-test-pod
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: ghostfs-volume
+          mountPath: /data
+  volumes:
+    - name: ghostfs-volume
+      persistentVolumeClaim:
+        claimName: ghostfs-pvc
