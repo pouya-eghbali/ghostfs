@@ -1,0 +1,32 @@
+name: Benchmark
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run Benchmarks
+        run: |
+          cd e2e
+          docker compose -f docker-compose.benchmark.yml up --build --exit-code-from ghostfs
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd e2e
+          docker compose -f docker-compose.benchmark.yml down --volumes --remove-orphans || true
