@@ -139,17 +139,17 @@ SMALL_IN_MS=$((END - START))
 SMALL_IN_THROUGHPUT=$(calc_throughput $TOTAL_SMALL $SMALL_IN_MS)
 log_result "Small files IN: ${SMALL_IN_MS}ms (${SMALL_IN_THROUGHPUT} MB/s)"
 
-# Small files OUT
+# Small files OUT (pure read - no local disk write overhead)
 log_info "Small files copy OUT..."
+if ! $IS_MACOS; then
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+fi
 START=$(date +%s%3N)
-cp -r "$MOUNT/bench/"* "$COPYOUT/"
-sync
+find "$MOUNT/bench" -type f -exec cat {} \; > /dev/null
 END=$(date +%s%3N)
 SMALL_OUT_MS=$((END - START))
 SMALL_OUT_THROUGHPUT=$(calc_throughput $TOTAL_SMALL $SMALL_OUT_MS)
 log_result "Small files OUT: ${SMALL_OUT_MS}ms (${SMALL_OUT_THROUGHPUT} MB/s)"
-
-rm -rf "$COPYOUT"/*
 
 # Big file IN
 log_info "Big file copy IN..."
@@ -161,15 +161,20 @@ BIG_IN_MS=$((END - START))
 BIG_IN_THROUGHPUT=$(calc_throughput $TOTAL_BIG $BIG_IN_MS)
 log_result "Big file IN: ${BIG_IN_MS}ms (${BIG_IN_THROUGHPUT} MB/s)"
 
-# Big file OUT
+# Big file OUT (pure read - no local disk write overhead)
 log_info "Big file copy OUT..."
+if ! $IS_MACOS; then
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+fi
 START=$(date +%s%3N)
-cp "$MOUNT/big.bin" "$COPYOUT/big.bin"
-sync
+cat "$MOUNT/big.bin" > /dev/null
 END=$(date +%s%3N)
 BIG_OUT_MS=$((END - START))
 BIG_OUT_THROUGHPUT=$(calc_throughput $TOTAL_BIG $BIG_OUT_MS)
 log_result "Big file OUT: ${BIG_OUT_MS}ms (${BIG_OUT_THROUGHPUT} MB/s)"
+
+# Copy for verification (not timed)
+cp "$MOUNT/big.bin" "$COPYOUT/big.bin"
 
 # Verify
 log_info "Verifying integrity..."

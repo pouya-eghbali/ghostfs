@@ -1,0 +1,17 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake g++ git libfuse-dev libssl-dev zlib1g-dev fuse3 bc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /ghostfs
+COPY . .
+
+RUN cmake -S standalone -B build/standalone \
+    && cmake --build build/standalone -j$(nproc)
+
+RUN mkdir -p /tmp/ghostfs-bench-root/benchuser /tmp/ghostfs-bench-mount
+
+CMD ["./benchmark.sh"]
