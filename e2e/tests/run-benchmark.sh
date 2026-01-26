@@ -181,6 +181,7 @@ sync
 START_MS=$(date +%s%3N)
 cp -r "$LOCAL_SMALL_DIR"/* "$GHOSTFS_SMALL_DIR/"
 sync
+sleep 1  # Allow async writes to fully flush
 END_MS=$(date +%s%3N)
 
 DURATION_MS=$((END_MS - START_MS))
@@ -188,6 +189,10 @@ THROUGHPUT=$(calc_throughput $TOTAL_SMALL_BYTES $DURATION_MS)
 
 log_result "Small files copy IN: ${DURATION_MS}ms (${THROUGHPUT}/s)"
 echo "    {\"name\": \"small_files_copy_in\", \"files\": $SMALL_FILE_COUNT, \"bytes\": $TOTAL_SMALL_BYTES, \"duration_ms\": $DURATION_MS}," >> "$JSON_OUTPUT"
+
+# Verify file count on GhostFS
+GHOSTFS_COUNT=$(ls "$GHOSTFS_SMALL_DIR" | wc -l)
+log_info "Files on GhostFS: $GHOSTFS_COUNT (expected: $SMALL_FILE_COUNT)"
 
 # ============================================================================
 # Benchmark 2: Small files copy OUT (GhostFS -> local)
@@ -208,6 +213,10 @@ THROUGHPUT=$(calc_throughput $TOTAL_SMALL_BYTES $DURATION_MS)
 log_result "Small files copy OUT: ${DURATION_MS}ms (${THROUGHPUT}/s)"
 echo "    {\"name\": \"small_files_copy_out\", \"files\": $SMALL_FILE_COUNT, \"bytes\": $TOTAL_SMALL_BYTES, \"duration_ms\": $DURATION_MS}," >> "$JSON_OUTPUT"
 
+# Verify file count on copyout
+COPYOUT_COUNT=$(ls "$COPYOUT_SMALL_DIR" | wc -l)
+log_info "Files copied out: $COPYOUT_COUNT (expected: $SMALL_FILE_COUNT)"
+
 # Verify integrity of small files
 log_info "Verifying small files integrity..."
 SMALL_HASH_LOCAL=$(find "$LOCAL_SMALL_DIR" -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
@@ -219,6 +228,21 @@ else
     echo -e "${RED}[ERROR]${NC} Small files integrity: FAILED"
     echo "  Local hash:   $SMALL_HASH_LOCAL"
     echo "  Copyout hash: $SMALL_HASH_COPYOUT"
+    # Show first few differing files for debugging
+    log_info "Finding differing files..."
+    DIFF_COUNT=0
+    for f in $(ls "$LOCAL_SMALL_DIR"); do
+        LOCAL_H=$(sha256sum "$LOCAL_SMALL_DIR/$f" 2>/dev/null | cut -d' ' -f1)
+        COPY_H=$(sha256sum "$COPYOUT_SMALL_DIR/$f" 2>/dev/null | cut -d' ' -f1)
+        if [ "$LOCAL_H" != "$COPY_H" ]; then
+            echo "  DIFF: $f (local: ${LOCAL_H:0:16}... copy: ${COPY_H:0:16}...)"
+            DIFF_COUNT=$((DIFF_COUNT + 1))
+            if [ $DIFF_COUNT -ge 5 ]; then
+                echo "  ... (showing first 5 differences)"
+                break
+            fi
+        fi
+    done
 fi
 
 # ============================================================================

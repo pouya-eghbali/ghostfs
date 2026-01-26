@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     zlib1g-dev \
     fuse3 \
+    bc \
     && rm -rf /var/lib/apt/lists/*
 
 # Create working directory
