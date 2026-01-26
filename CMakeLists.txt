@@ -80,8 +80,8 @@ if(GHOSTFS_CSI_SUPPORT)
     set(CSI_GRPC_HDRS "${CSI_PROTO_OUT_DIR}/csi.grpc.pb.h")
 
     # Find protoc and grpc_cpp_plugin
-    get_target_property(PROTOC_EXECUTABLE protobuf::protoc LOCATION)
-    find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin)
+    find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+    find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
 
     add_custom_command(
       OUTPUT ${CSI_PROTO_SRCS} ${CSI_PROTO_HDRS} ${CSI_GRPC_SRCS} ${CSI_GRPC_HDRS}
@@ -94,12 +94,6 @@ if(GHOSTFS_CSI_SUPPORT)
       DEPENDS ${CSI_PROTO_FILE}
       COMMENT "Generating CSI protobuf and gRPC files"
     )
-
-    # Create library for generated CSI proto files
-    add_library(csi_proto STATIC ${CSI_PROTO_SRCS} ${CSI_GRPC_SRCS})
-    target_include_directories(csi_proto PUBLIC ${CSI_PROTO_OUT_DIR})
-    target_link_libraries(csi_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
-    set_target_properties(csi_proto PROPERTIES CXX_STANDARD 20)
   endif()
 endif()
 
@@ -143,7 +137,12 @@ file(GLOB_RECURSE capnp_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/c
 
 # Note: for header-only libraries change all PUBLIC flags to INTERFACE and create an interface
 # target: add_library(${PROJECT_NAME} INTERFACE)
-add_library(${PROJECT_NAME} ${capnp_headers} ${capnp_sources} ${headers} ${sources})
+if(GHOSTFS_CSI_SUPPORT)
+  # Include generated CSI proto sources directly in the library
+  add_library(${PROJECT_NAME} ${capnp_headers} ${capnp_sources} ${headers} ${sources} ${CSI_PROTO_SRCS} ${CSI_GRPC_SRCS})
+else()
+  add_library(${PROJECT_NAME} ${capnp_headers} ${capnp_sources} ${headers} ${sources})
+endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 20)
 
@@ -174,7 +173,7 @@ endif()
 # CSI support
 if(GHOSTFS_CSI_SUPPORT)
   target_compile_definitions(${PROJECT_NAME} PRIVATE GHOSTFS_CSI_SUPPORT)
-  target_link_libraries(${PROJECT_NAME} PRIVATE csi_proto)
+  target_link_libraries(${PROJECT_NAME} PRIVATE protobuf::libprotobuf gRPC::grpc++)
   target_include_directories(${PROJECT_NAME} PRIVATE ${CSI_PROTO_OUT_DIR})
 endif()
 

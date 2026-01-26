@@ -103,7 +103,7 @@ echo ""
 # Test 1: Identity - GetPluginInfo
 test_get_plugin_info() {
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" csi.v1.Identity/GetPluginInfo 2>&1)
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto "unix://$CSI_SOCKET" csi.v1.Identity/GetPluginInfo 2>&1)
 
     if echo "$response" | grep -q "ghostfs.csi.k8s.io"; then
         log_pass "GetPluginInfo returns correct plugin name"
@@ -115,7 +115,7 @@ test_get_plugin_info() {
 # Test 2: Identity - Probe
 test_probe() {
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" csi.v1.Identity/Probe 2>&1)
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto "unix://$CSI_SOCKET" csi.v1.Identity/Probe 2>&1)
 
     if echo "$response" | grep -q "ready" || [ -z "$response" ] || echo "$response" | grep -q "{}"; then
         log_pass "Probe returns ready"
@@ -127,7 +127,7 @@ test_probe() {
 # Test 3: Node - GetCapabilities
 test_node_get_capabilities() {
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" csi.v1.Node/NodeGetCapabilities 2>&1)
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto "unix://$CSI_SOCKET" csi.v1.Node/NodeGetCapabilities 2>&1)
 
     # Empty capabilities is valid for a simple CSI driver
     if [ $? -eq 0 ]; then
@@ -140,7 +140,7 @@ test_node_get_capabilities() {
 # Test 4: Node - GetInfo
 test_node_get_info() {
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" csi.v1.Node/NodeGetInfo 2>&1)
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto "unix://$CSI_SOCKET" csi.v1.Node/NodeGetInfo 2>&1)
 
     if echo "$response" | grep -q "nodeId"; then
         log_pass "NodeGetInfo returns node ID"
@@ -152,22 +152,11 @@ test_node_get_info() {
 # Test 5: NodePublishVolume - Mount a volume
 test_node_publish_volume() {
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" \
-        -d "{
-            \"volume_id\": \"test-vol-1\",
-            \"target_path\": \"$MOUNT\",
-            \"volume_capability\": {
-                \"mount\": {},
-                \"access_mode\": {\"mode\": 5}
-            },
-            \"volume_context\": {
-                \"host\": \"$HOST\",
-                \"port\": \"$PORT\",
-                \"user\": \"$USER\",
-                \"token\": \"$TOKEN\"
-            }
-        }" \
-        csi.v1.Node/NodePublishVolume 2>&1)
+    local json_data="{\"volume_id\":\"test-vol-1\",\"target_path\":\"$MOUNT\",\"volume_capability\":{\"mount\":{},\"access_mode\":{\"mode\":5}},\"volume_context\":{\"host\":\"$HOST\",\"port\":\"$PORT\",\"user\":\"$USER\",\"token\":\"$TOKEN\"}}"
+
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto \
+        -d "$json_data" \
+        "unix://$CSI_SOCKET" csi.v1.Node/NodePublishVolume 2>&1)
 
     # Give mount time to establish
     sleep 3
@@ -245,12 +234,11 @@ test_csi_large_file_integrity() {
 # Test 8: NodeUnpublishVolume - Unmount volume
 test_node_unpublish_volume() {
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" \
-        -d "{
-            \"volume_id\": \"test-vol-1\",
-            \"target_path\": \"$MOUNT\"
-        }" \
-        csi.v1.Node/NodeUnpublishVolume 2>&1)
+    local json_data="{\"volume_id\":\"test-vol-1\",\"target_path\":\"$MOUNT\"}"
+
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto \
+        -d "$json_data" \
+        "unix://$CSI_SOCKET" csi.v1.Node/NodeUnpublishVolume 2>&1)
 
     # Give unmount time to complete
     sleep 2
@@ -266,22 +254,11 @@ test_node_unpublish_volume() {
 test_csi_data_persistence() {
     # Mount again
     local response
-    response=$(grpcurl -plaintext -unix "$CSI_SOCKET" \
-        -d "{
-            \"volume_id\": \"test-vol-2\",
-            \"target_path\": \"$MOUNT\",
-            \"volume_capability\": {
-                \"mount\": {},
-                \"access_mode\": {\"mode\": 5}
-            },
-            \"volume_context\": {
-                \"host\": \"$HOST\",
-                \"port\": \"$PORT\",
-                \"user\": \"$USER\",
-                \"token\": \"$TOKEN\"
-            }
-        }" \
-        csi.v1.Node/NodePublishVolume 2>&1)
+    local json_data="{\"volume_id\":\"test-vol-2\",\"target_path\":\"$MOUNT\",\"volume_capability\":{\"mount\":{},\"access_mode\":{\"mode\":5}},\"volume_context\":{\"host\":\"$HOST\",\"port\":\"$PORT\",\"user\":\"$USER\",\"token\":\"$TOKEN\"}}"
+
+    response=$(grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto \
+        -d "$json_data" \
+        "unix://$CSI_SOCKET" csi.v1.Node/NodePublishVolume 2>&1)
 
     sleep 3
 
@@ -305,12 +282,10 @@ test_csi_data_persistence() {
     fi
 
     # Cleanup: unmount
-    grpcurl -plaintext -unix "$CSI_SOCKET" \
-        -d "{
-            \"volume_id\": \"test-vol-2\",
-            \"target_path\": \"$MOUNT\"
-        }" \
-        csi.v1.Node/NodeUnpublishVolume 2>&1 >/dev/null
+    local cleanup_json="{\"volume_id\":\"test-vol-2\",\"target_path\":\"$MOUNT\"}"
+    grpcurl -plaintext -import-path /ghostfs/csi -proto csi.proto \
+        -d "$cleanup_json" \
+        "unix://$CSI_SOCKET" csi.v1.Node/NodeUnpublishVolume 2>&1 >/dev/null
     sleep 2
 }
 
