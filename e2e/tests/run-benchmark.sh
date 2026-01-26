@@ -20,7 +20,8 @@ TOKEN=""
 # Benchmark configuration
 SMALL_FILE_COUNT=1000
 SMALL_FILE_SIZE=4096  # 4KB each
-BIG_FILE_SIZE_MB=100  # 100MB
+BIG_FILE_SIZE_MB=1000  # 1000MB (1GB)
+CACHE_SIZES=(8 32 64 128 255)  # Different cache sizes to test
 
 log_info() {
     echo -e "${YELLOW}[INFO]${NC} $1"
@@ -57,7 +58,6 @@ trap cleanup EXIT
 # Format bytes to human readable
 format_size() {
     local bytes=$1
-    # Handle floating point by truncating to integer for comparison
     local int_bytes=$(echo "$bytes" | cut -d'.' -f1)
     if [ "$int_bytes" -ge 1073741824 ] 2>/dev/null; then
         echo "$(echo "scale=2; $bytes / 1073741824" | bc) GB"
@@ -80,6 +80,27 @@ calc_throughput() {
     else
         echo "N/A"
     fi
+}
+
+# Mount filesystem with specific cache size
+mount_with_cache() {
+    local cache_size=$1
+
+    # Unmount if already mounted
+    if mountpoint -q "$MOUNT" 2>/dev/null; then
+        fusermount -u "$MOUNT" 2>/dev/null || umount "$MOUNT" 2>/dev/null || true
+        sleep 1
+    fi
+
+    ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
+        --write-back "$cache_size" --read-ahead "$cache_size" "$MOUNT" &
+    sleep 2
+
+    if ! mountpoint -q "$MOUNT"; then
+        echo "Failed to mount filesystem with cache size $cache_size"
+        return 1
+    fi
+    return 0
 }
 
 # Setup
@@ -110,22 +131,8 @@ if [ -z "$TOKEN" ]; then
 fi
 log_info "Got token: $TOKEN"
 
-# Mount the filesystem
-log_info "Mounting GhostFS client..."
-ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
-    --write-back 64 --read-ahead 64 "$MOUNT" &
-CLIENT_PID=$!
-sleep 2
-
-# Check if mounted
-if ! mountpoint -q "$MOUNT"; then
-    echo "Failed to mount filesystem"
-    exit 1
-fi
-log_info "Filesystem mounted at $MOUNT"
-
 # ============================================================================
-# Benchmarks
+# Prepare test data
 # ============================================================================
 
 echo ""
@@ -136,19 +143,13 @@ echo ""
 echo "Configuration:"
 echo "  Small files: $SMALL_FILE_COUNT files x $(format_size $SMALL_FILE_SIZE)"
 echo "  Big file: $(format_size $((BIG_FILE_SIZE_MB * 1048576)))"
+echo "  Cache sizes to test: ${CACHE_SIZES[*]}"
 echo ""
 
-# Prepare local test data
-log_info "Preparing test data..."
 LOCAL_SMALL_DIR="/tmp/bench_small_local"
 LOCAL_BIG_FILE="/tmp/bench_big_local.bin"
-GHOSTFS_SMALL_DIR="$MOUNT/bench_small"
-GHOSTFS_BIG_FILE="$MOUNT/bench_big.bin"
-COPYOUT_SMALL_DIR="/tmp/bench_small_copyout"
-COPYOUT_BIG_FILE="/tmp/bench_big_copyout.bin"
 
 mkdir -p "$LOCAL_SMALL_DIR"
-mkdir -p "$COPYOUT_SMALL_DIR"
 
 # Generate small files
 log_info "Generating $SMALL_FILE_COUNT small files..."
@@ -157,150 +158,165 @@ for i in $(seq 1 $SMALL_FILE_COUNT); do
 done
 
 # Generate big file
-log_info "Generating ${BIG_FILE_SIZE_MB}MB big file..."
+log_info "Generating ${BIG_FILE_SIZE_MB}MB big file (this may take a moment)..."
 dd if=/dev/urandom of="$LOCAL_BIG_FILE" bs=1M count=$BIG_FILE_SIZE_MB 2>/dev/null
+
+# Calculate hashes for verification
+log_info "Calculating source file hashes..."
+SMALL_HASH_EXPECTED=$(cd "$LOCAL_SMALL_DIR" && find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+BIG_HASH_EXPECTED=$(sha256sum "$LOCAL_BIG_FILE" | cut -d' ' -f1)
 
 TOTAL_SMALL_BYTES=$((SMALL_FILE_COUNT * SMALL_FILE_SIZE))
 TOTAL_BIG_BYTES=$((BIG_FILE_SIZE_MB * 1048576))
 
-echo ""
-log_benchmark "Starting benchmarks..."
-echo ""
-
 # JSON output for CI parsing
 JSON_OUTPUT="/tmp/benchmark_results.json"
 echo "{" > "$JSON_OUTPUT"
+echo '  "config": {' >> "$JSON_OUTPUT"
+echo "    \"small_file_count\": $SMALL_FILE_COUNT," >> "$JSON_OUTPUT"
+echo "    \"small_file_size\": $SMALL_FILE_SIZE," >> "$JSON_OUTPUT"
+echo "    \"big_file_size_mb\": $BIG_FILE_SIZE_MB" >> "$JSON_OUTPUT"
+echo '  },' >> "$JSON_OUTPUT"
 echo '  "benchmarks": [' >> "$JSON_OUTPUT"
 
-# ============================================================================
-# Benchmark 1: Small files copy IN (local -> GhostFS)
-# ============================================================================
-log_benchmark "Benchmark 1: Copy $SMALL_FILE_COUNT small files IN (local -> GhostFS)"
-
-mkdir -p "$GHOSTFS_SMALL_DIR"
-sync
-
-START_MS=$(date +%s%3N)
-cp -r "$LOCAL_SMALL_DIR"/* "$GHOSTFS_SMALL_DIR/"
-sync
-sleep 1  # Allow async writes to fully flush
-END_MS=$(date +%s%3N)
-
-DURATION_MS=$((END_MS - START_MS))
-THROUGHPUT=$(calc_throughput $TOTAL_SMALL_BYTES $DURATION_MS)
-
-log_result "Small files copy IN: ${DURATION_MS}ms (${THROUGHPUT}/s)"
-echo "    {\"name\": \"small_files_copy_in\", \"files\": $SMALL_FILE_COUNT, \"bytes\": $TOTAL_SMALL_BYTES, \"duration_ms\": $DURATION_MS}," >> "$JSON_OUTPUT"
-
-# Verify file count on GhostFS
-GHOSTFS_COUNT=$(ls "$GHOSTFS_SMALL_DIR" | wc -l)
-log_info "Files on GhostFS: $GHOSTFS_COUNT (expected: $SMALL_FILE_COUNT)"
+FIRST_ENTRY=true
 
 # ============================================================================
-# Benchmark 2: Small files copy OUT (GhostFS -> local)
+# Run benchmarks for each cache size
 # ============================================================================
-log_benchmark "Benchmark 2: Copy $SMALL_FILE_COUNT small files OUT (GhostFS -> local)"
 
-sync
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true  # Drop page cache if possible
+for CACHE_SIZE in "${CACHE_SIZES[@]}"; do
+    echo ""
+    echo "============================================"
+    log_benchmark "Testing with cache size: $CACHE_SIZE"
+    echo "============================================"
 
-START_MS=$(date +%s%3N)
-cp -r "$GHOSTFS_SMALL_DIR"/* "$COPYOUT_SMALL_DIR/"
-sync
-END_MS=$(date +%s%3N)
+    # Mount with this cache size
+    if ! mount_with_cache "$CACHE_SIZE"; then
+        continue
+    fi
 
-DURATION_MS=$((END_MS - START_MS))
-THROUGHPUT=$(calc_throughput $TOTAL_SMALL_BYTES $DURATION_MS)
+    # Prepare GhostFS directories
+    GHOSTFS_SMALL_DIR="$MOUNT/bench_small_$CACHE_SIZE"
+    GHOSTFS_BIG_FILE="$MOUNT/bench_big_$CACHE_SIZE.bin"
+    COPYOUT_SMALL_DIR="/tmp/bench_small_copyout_$CACHE_SIZE"
+    COPYOUT_BIG_FILE="/tmp/bench_big_copyout_$CACHE_SIZE.bin"
 
-log_result "Small files copy OUT: ${DURATION_MS}ms (${THROUGHPUT}/s)"
-echo "    {\"name\": \"small_files_copy_out\", \"files\": $SMALL_FILE_COUNT, \"bytes\": $TOTAL_SMALL_BYTES, \"duration_ms\": $DURATION_MS}," >> "$JSON_OUTPUT"
+    mkdir -p "$GHOSTFS_SMALL_DIR"
+    mkdir -p "$COPYOUT_SMALL_DIR"
 
-# Verify file count on copyout
-COPYOUT_COUNT=$(ls "$COPYOUT_SMALL_DIR" | wc -l)
-log_info "Files copied out: $COPYOUT_COUNT (expected: $SMALL_FILE_COUNT)"
+    # Add comma separator for JSON
+    if [ "$FIRST_ENTRY" = false ]; then
+        echo "," >> "$JSON_OUTPUT"
+    fi
+    FIRST_ENTRY=false
 
-# Verify integrity of small files
-# Use basename in awk to compare only filenames and hashes, not full paths
-log_info "Verifying small files integrity..."
-SMALL_HASH_LOCAL=$(cd "$LOCAL_SMALL_DIR" && find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
-SMALL_HASH_COPYOUT=$(cd "$COPYOUT_SMALL_DIR" && find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+    # ------------------------------------------------------------------------
+    # Benchmark: Small files copy IN
+    # ------------------------------------------------------------------------
+    log_benchmark "Small files copy IN (cache=$CACHE_SIZE)..."
+    sync
 
-if [ "$SMALL_HASH_LOCAL" = "$SMALL_HASH_COPYOUT" ]; then
-    log_result "Small files integrity: PASSED"
-else
-    echo -e "${RED}[ERROR]${NC} Small files integrity: FAILED"
-    echo "  Local hash:   $SMALL_HASH_LOCAL"
-    echo "  Copyout hash: $SMALL_HASH_COPYOUT"
-    # Show first few differing files for debugging
-    log_info "Finding differing files..."
-    DIFF_COUNT=0
-    for f in $(ls "$LOCAL_SMALL_DIR"); do
-        LOCAL_H=$(sha256sum "$LOCAL_SMALL_DIR/$f" 2>/dev/null | cut -d' ' -f1)
-        COPY_H=$(sha256sum "$COPYOUT_SMALL_DIR/$f" 2>/dev/null | cut -d' ' -f1)
-        if [ "$LOCAL_H" != "$COPY_H" ]; then
-            echo "  DIFF: $f (local: ${LOCAL_H:0:16}... copy: ${COPY_H:0:16}...)"
-            DIFF_COUNT=$((DIFF_COUNT + 1))
-            if [ $DIFF_COUNT -ge 5 ]; then
-                echo "  ... (showing first 5 differences)"
-                break
-            fi
-        fi
-    done
-fi
+    START_MS=$(date +%s%3N)
+    cp -r "$LOCAL_SMALL_DIR"/* "$GHOSTFS_SMALL_DIR/"
+    sync
+    sleep 1
+    END_MS=$(date +%s%3N)
 
-# ============================================================================
-# Benchmark 3: Big file copy IN (local -> GhostFS)
-# ============================================================================
-log_benchmark "Benchmark 3: Copy ${BIG_FILE_SIZE_MB}MB big file IN (local -> GhostFS)"
+    SMALL_IN_MS=$((END_MS - START_MS))
+    SMALL_IN_THROUGHPUT=$(calc_throughput $TOTAL_SMALL_BYTES $SMALL_IN_MS)
+    log_result "Small files copy IN: ${SMALL_IN_MS}ms (${SMALL_IN_THROUGHPUT}/s)"
 
-sync
+    # ------------------------------------------------------------------------
+    # Benchmark: Small files copy OUT
+    # ------------------------------------------------------------------------
+    log_benchmark "Small files copy OUT (cache=$CACHE_SIZE)..."
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 
-START_MS=$(date +%s%3N)
-cp "$LOCAL_BIG_FILE" "$GHOSTFS_BIG_FILE"
-sync
-END_MS=$(date +%s%3N)
+    START_MS=$(date +%s%3N)
+    cp -r "$GHOSTFS_SMALL_DIR"/* "$COPYOUT_SMALL_DIR/"
+    sync
+    END_MS=$(date +%s%3N)
 
-DURATION_MS=$((END_MS - START_MS))
-THROUGHPUT=$(calc_throughput $TOTAL_BIG_BYTES $DURATION_MS)
+    SMALL_OUT_MS=$((END_MS - START_MS))
+    SMALL_OUT_THROUGHPUT=$(calc_throughput $TOTAL_SMALL_BYTES $SMALL_OUT_MS)
+    log_result "Small files copy OUT: ${SMALL_OUT_MS}ms (${SMALL_OUT_THROUGHPUT}/s)"
 
-log_result "Big file copy IN: ${DURATION_MS}ms (${THROUGHPUT}/s)"
-echo "    {\"name\": \"big_file_copy_in\", \"bytes\": $TOTAL_BIG_BYTES, \"duration_ms\": $DURATION_MS}," >> "$JSON_OUTPUT"
+    # Verify small files integrity
+    SMALL_HASH_ACTUAL=$(cd "$COPYOUT_SMALL_DIR" && find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+    if [ "$SMALL_HASH_EXPECTED" = "$SMALL_HASH_ACTUAL" ]; then
+        log_result "Small files integrity: PASSED"
+        SMALL_INTEGRITY="true"
+    else
+        echo -e "${RED}[ERROR]${NC} Small files integrity: FAILED"
+        SMALL_INTEGRITY="false"
+    fi
 
-# ============================================================================
-# Benchmark 4: Big file copy OUT (GhostFS -> local)
-# ============================================================================
-log_benchmark "Benchmark 4: Copy ${BIG_FILE_SIZE_MB}MB big file OUT (GhostFS -> local)"
+    # ------------------------------------------------------------------------
+    # Benchmark: Big file copy IN
+    # ------------------------------------------------------------------------
+    log_benchmark "Big file copy IN (cache=$CACHE_SIZE)..."
+    sync
 
-sync
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true  # Drop page cache if possible
+    START_MS=$(date +%s%3N)
+    cp "$LOCAL_BIG_FILE" "$GHOSTFS_BIG_FILE"
+    sync
+    END_MS=$(date +%s%3N)
 
-START_MS=$(date +%s%3N)
-cp "$GHOSTFS_BIG_FILE" "$COPYOUT_BIG_FILE"
-sync
-END_MS=$(date +%s%3N)
+    BIG_IN_MS=$((END_MS - START_MS))
+    BIG_IN_THROUGHPUT=$(calc_throughput $TOTAL_BIG_BYTES $BIG_IN_MS)
+    log_result "Big file copy IN: ${BIG_IN_MS}ms (${BIG_IN_THROUGHPUT}/s)"
 
-DURATION_MS=$((END_MS - START_MS))
-THROUGHPUT=$(calc_throughput $TOTAL_BIG_BYTES $DURATION_MS)
+    # ------------------------------------------------------------------------
+    # Benchmark: Big file copy OUT
+    # ------------------------------------------------------------------------
+    log_benchmark "Big file copy OUT (cache=$CACHE_SIZE)..."
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 
-log_result "Big file copy OUT: ${DURATION_MS}ms (${THROUGHPUT}/s)"
-echo "    {\"name\": \"big_file_copy_out\", \"bytes\": $TOTAL_BIG_BYTES, \"duration_ms\": $DURATION_MS}" >> "$JSON_OUTPUT"
+    START_MS=$(date +%s%3N)
+    cp "$GHOSTFS_BIG_FILE" "$COPYOUT_BIG_FILE"
+    sync
+    END_MS=$(date +%s%3N)
 
-# Verify integrity of big file
-log_info "Verifying big file integrity..."
-BIG_HASH_LOCAL=$(sha256sum "$LOCAL_BIG_FILE" | cut -d' ' -f1)
-BIG_HASH_GHOSTFS=$(sha256sum "$GHOSTFS_BIG_FILE" | cut -d' ' -f1)
-BIG_HASH_COPYOUT=$(sha256sum "$COPYOUT_BIG_FILE" | cut -d' ' -f1)
+    BIG_OUT_MS=$((END_MS - START_MS))
+    BIG_OUT_THROUGHPUT=$(calc_throughput $TOTAL_BIG_BYTES $BIG_OUT_MS)
+    log_result "Big file copy OUT: ${BIG_OUT_MS}ms (${BIG_OUT_THROUGHPUT}/s)"
 
-if [ "$BIG_HASH_LOCAL" = "$BIG_HASH_GHOSTFS" ] && [ "$BIG_HASH_GHOSTFS" = "$BIG_HASH_COPYOUT" ]; then
-    log_result "Big file integrity: PASSED"
-else
-    echo -e "${RED}[ERROR]${NC} Big file integrity: FAILED"
-    echo "  Local hash:   $BIG_HASH_LOCAL"
-    echo "  GhostFS hash: $BIG_HASH_GHOSTFS"
-    echo "  Copyout hash: $BIG_HASH_COPYOUT"
-fi
+    # Verify big file integrity
+    BIG_HASH_ACTUAL=$(sha256sum "$COPYOUT_BIG_FILE" | cut -d' ' -f1)
+    if [ "$BIG_HASH_EXPECTED" = "$BIG_HASH_ACTUAL" ]; then
+        log_result "Big file integrity: PASSED"
+        BIG_INTEGRITY="true"
+    else
+        echo -e "${RED}[ERROR]${NC} Big file integrity: FAILED"
+        BIG_INTEGRITY="false"
+    fi
+
+    # Write JSON entry
+    cat >> "$JSON_OUTPUT" << EOF
+    {
+      "cache_size": $CACHE_SIZE,
+      "small_files": {
+        "copy_in_ms": $SMALL_IN_MS,
+        "copy_out_ms": $SMALL_OUT_MS,
+        "integrity": $SMALL_INTEGRITY
+      },
+      "big_file": {
+        "copy_in_ms": $BIG_IN_MS,
+        "copy_out_ms": $BIG_OUT_MS,
+        "integrity": $BIG_INTEGRITY
+      }
+    }
+EOF
+
+    # Clean up for next iteration
+    rm -rf "$COPYOUT_SMALL_DIR" "$COPYOUT_BIG_FILE"
+done
 
 # Close JSON
+echo "" >> "$JSON_OUTPUT"
 echo '  ]' >> "$JSON_OUTPUT"
 echo '}' >> "$JSON_OUTPUT"
 
