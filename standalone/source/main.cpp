@@ -4,6 +4,10 @@
 #include <ghostfs/version.h>
 #include <sys/resource.h>
 
+#ifdef GHOSTFS_CSI_SUPPORT
+#include <ghostfs/csi.h>
+#endif
+
 #include <cxxopts.hpp>
 #include <filesystem>
 #include <iostream>
@@ -41,6 +45,10 @@ auto main(int argc, char** argv) -> int {
     ("U,unmount", "Soft unmount a directory")
     ("s,server", "Run in server mode")
     ("c,client", "Run in client mode")
+#ifdef GHOSTFS_CSI_SUPPORT
+    ("csi", "Run as CSI driver")
+    ("csi-socket", "CSI socket path", cxxopts::value<std::string>()->default_value("/csi/csi.sock"))
+#endif
     ("mountpoint", "Mount point for client mode", cxxopts::value<std::string>()->default_value(""));
 
   // clang-format on
@@ -136,5 +144,16 @@ auto main(int argc, char** argv) -> int {
 
     return destination.length() ? rpc_unmount(port, user, destination)
                                 : rpc_unmount_all(port, user);
+
+#ifdef GHOSTFS_CSI_SUPPORT
+  } else if (result["csi"].as<bool>()) {
+    std::string socket_path = result["csi-socket"].as<std::string>();
+    std::cout << "Starting GhostFS CSI driver..." << std::endl;
+    return ghostfs::csi::start_csi_server(socket_path);
+#endif
   }
+
+  // No mode specified - show help
+  std::cout << options.help() << std::endl;
+  return 1;
 }

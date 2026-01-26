@@ -9,6 +9,9 @@ project(
   LANGUAGES CXX
 )
 
+# ---- Options ----
+option(GHOSTFS_CSI_SUPPORT "Enable CSI driver support (requires gRPC, Linux only)" OFF)
+
 # ---- Include guards ----
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
   message(
@@ -57,6 +60,49 @@ CPMAddPackage(
   OPTIONS "FMT_INSTALL YES" # create an installable target
 )
 
+# ---- CSI Support (optional, requires gRPC) ----
+if(GHOSTFS_CSI_SUPPORT)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(WARNING "CSI support is only available on Linux. Disabling GHOSTFS_CSI_SUPPORT.")
+    set(GHOSTFS_CSI_SUPPORT OFF)
+  else()
+    find_package(Protobuf REQUIRED)
+    find_package(gRPC REQUIRED)
+
+    # Generate protobuf and gRPC files from csi.proto
+    set(CSI_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/csi/csi.proto")
+    set(CSI_PROTO_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/csi_proto")
+    file(MAKE_DIRECTORY ${CSI_PROTO_OUT_DIR})
+
+    set(CSI_PROTO_SRCS "${CSI_PROTO_OUT_DIR}/csi.pb.cc")
+    set(CSI_PROTO_HDRS "${CSI_PROTO_OUT_DIR}/csi.pb.h")
+    set(CSI_GRPC_SRCS "${CSI_PROTO_OUT_DIR}/csi.grpc.pb.cc")
+    set(CSI_GRPC_HDRS "${CSI_PROTO_OUT_DIR}/csi.grpc.pb.h")
+
+    # Find protoc and grpc_cpp_plugin
+    get_target_property(PROTOC_EXECUTABLE protobuf::protoc LOCATION)
+    find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin)
+
+    add_custom_command(
+      OUTPUT ${CSI_PROTO_SRCS} ${CSI_PROTO_HDRS} ${CSI_GRPC_SRCS} ${CSI_GRPC_HDRS}
+      COMMAND ${PROTOC_EXECUTABLE}
+        --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/csi
+        --cpp_out=${CSI_PROTO_OUT_DIR}
+        --grpc_out=${CSI_PROTO_OUT_DIR}
+        --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+        ${CSI_PROTO_FILE}
+      DEPENDS ${CSI_PROTO_FILE}
+      COMMENT "Generating CSI protobuf and gRPC files"
+    )
+
+    # Create library for generated CSI proto files
+    add_library(csi_proto STATIC ${CSI_PROTO_SRCS} ${CSI_GRPC_SRCS})
+    target_include_directories(csi_proto PUBLIC ${CSI_PROTO_OUT_DIR})
+    target_link_libraries(csi_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
+    set_target_properties(csi_proto PROPERTIES CXX_STANDARD 20)
+  endif()
+endif()
+
 # ---- Build type ----
 # set(CMAKE_BUILD_TYPE Debug)
 # set(CMAKE_BUILD_TYPE RelWithDebInfo)
@@ -84,6 +130,11 @@ include_directories(${FUSE_INCLUDE_DIR})
 # automatically. Keep that in mind when changing files, or explicitly mention them here.
 file(GLOB_RECURSE headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/source/*.cpp")
+
+# Exclude csi.cpp if CSI support is not enabled (it won't compile without gRPC)
+if(NOT GHOSTFS_CSI_SUPPORT)
+  list(FILTER sources EXCLUDE REGEX ".*csi\\.cpp$")
+endif()
 
 file(GLOB_RECURSE capnp_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/capnp/*.h")
 file(GLOB_RECURSE capnp_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/capnp/*.c++")
@@ -118,6 +169,13 @@ if(USE_UUID_V4)
     $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
   )
   target_compile_definitions(${PROJECT_NAME} PRIVATE USE_UUID_V4)
+endif()
+
+# CSI support
+if(GHOSTFS_CSI_SUPPORT)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE GHOSTFS_CSI_SUPPORT)
+  target_link_libraries(${PROJECT_NAME} PRIVATE csi_proto)
+  target_include_directories(${PROJECT_NAME} PRIVATE ${CSI_PROTO_OUT_DIR})
 endif()
 
 target_include_directories(
