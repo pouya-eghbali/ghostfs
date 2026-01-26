@@ -1,0 +1,74 @@
+name: Build For Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: "**/cpm_modules"
+          key: ${{ github.workflow }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}
+
+      - name: Install WinFSP
+        shell: powershell
+        run: |
+          Write-Host "Installing WinFSP via Chocolatey..."
+          choco install winfsp -y --no-progress
+          Start-Sleep -Seconds 2
+
+          $headerPaths = @(
+            "C:\Program Files (x86)\WinFsp\inc\winfsp\winfsp.h",
+            "C:\Program Files\WinFsp\inc\winfsp\winfsp.h"
+          )
+
+          $found = $false
+          foreach ($path in $headerPaths) {
+            if (Test-Path $path) {
+              Write-Host "WinFSP header found at: $path"
+              $found = $true
+              break
+            }
+          }
+
+          if (-not $found) {
+            Write-Error "WinFSP installation failed - header not found"
+            exit 1
+          }
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Configure
+        shell: cmd
+        run: |
+          cmake -S standalone -B build/standalone -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DWINFSP_PATH="C:/Program Files (x86)/WinFsp"
+
+      - name: Build
+        shell: cmd
+        run: cmake --build build/standalone --config Release -j %NUMBER_OF_PROCESSORS%
+
+      - name: Rename artifact
+        shell: powershell
+        run: |
+          Move-Item build/standalone/Release/GhostFS.exe build/standalone/Release/GhostFS-windows-x64.exe
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "build/standalone/Release/GhostFS-windows-x64.exe"
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true

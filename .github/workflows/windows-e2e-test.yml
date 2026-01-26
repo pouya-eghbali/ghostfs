@@ -1,0 +1,222 @@
+name: Windows E2E Tests
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  e2e:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install WinFSP
+        shell: powershell
+        run: |
+          Write-Host "Downloading WinFSP MSI installer..."
+          $winfspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi"
+          $msiPath = "$env:TEMP\winfsp.msi"
+          Invoke-WebRequest -Uri $winfspUrl -OutFile $msiPath -UseBasicParsing
+
+          Write-Host "Installing WinFSP with all components (including kernel driver)..."
+          # ADDLOCAL=ALL ensures kernel driver is installed
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msiPath`" /qn ADDLOCAL=ALL"
+          Start-Sleep -Seconds 3
+
+          # Verify installation
+          $found = $false
+          foreach ($path in @("C:\Program Files (x86)\WinFsp\inc\winfsp\winfsp.h", "C:\Program Files\WinFsp\inc\winfsp\winfsp.h")) {
+            if (Test-Path $path) { $found = $true; break }
+          }
+          if (-not $found) { Write-Error "WinFSP installation failed"; exit 1 }
+
+          # Check if kernel driver is installed
+          $driverPath = "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.sys"
+          if (Test-Path $driverPath) {
+            Write-Host "WinFSP kernel driver found at: $driverPath"
+          } else {
+            Write-Host "Warning: Kernel driver not found at expected path"
+          }
+
+          Write-Host "WinFSP installed successfully"
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Build Windows client
+        shell: cmd
+        run: |
+          cmake -S standalone -B build/standalone -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DWINFSP_PATH="C:/Program Files (x86)/WinFsp"
+          cmake --build build/standalone --config Release -j %NUMBER_OF_PROCESSORS%
+
+      - name: Setup WSL with Ubuntu
+        uses: Vampire/setup-wsl@v4
+        with:
+          distribution: Ubuntu-22.04
+          set-as-default: true
+
+      - name: Install build dependencies in WSL
+        shell: wsl-bash {0}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake g++ libfuse-dev libssl-dev zlib1g-dev fuse
+
+      - name: Build Linux server in WSL
+        shell: wsl-bash {0}
+        run: |
+          cd /mnt/d/a/ghostfs/ghostfs
+          cmake -S standalone -B build/linux -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/linux -j$(nproc)
+          test -f build/linux/GhostFS && echo "Linux server built successfully"
+
+      - name: Start Linux server
+        shell: wsl-bash {0}
+        run: |
+          mkdir -p /data/root/testuser
+          cd /mnt/d/a/ghostfs/ghostfs
+          nohup ./build/linux/GhostFS --server --root /data/root --bind 0.0.0.0 --port 3444 --auth-port 3445 > /tmp/server.log 2>&1 &
+          sleep 3
+          pgrep -f "GhostFS.*--server" && echo "Server started" || (cat /tmp/server.log; exit 1)
+
+      - name: Create test user token
+        id: auth
+        shell: powershell
+        run: |
+          $output = wsl bash -c 'cd /mnt/d/a/ghostfs/ghostfs && ./build/linux/GhostFS --authorize --host 127.0.0.1 --auth-port 3445 --user testuser --retries -1 2>&1'
+          $token = [regex]::Match($output, '[a-f0-9]{32,}').Value
+          if ($token) {
+            echo "TOKEN=$token" >> $env:GITHUB_OUTPUT
+            Write-Host "Token obtained"
+          } else {
+            Write-Error "Failed to get token: $output"
+            exit 1
+          }
+
+      - name: Run E2E Tests
+        shell: powershell
+        env:
+          TOKEN: ${{ steps.auth.outputs.TOKEN }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $passed = 0; $failed = 0
+
+          # Check WinFSP driver status
+          Write-Host "Checking WinFSP driver..."
+          $driver = Get-Service -Name "WinFsp.Launcher" -ErrorAction SilentlyContinue
+          if ($driver) { Write-Host "WinFsp.Launcher: $($driver.Status)" }
+          $driver = sc.exe query WinFsp.Sys 2>&1
+          Write-Host "WinFsp.Sys driver:`n$driver"
+
+          function Pass($m) { Write-Host "[PASS] $m" -ForegroundColor Green; $script:passed++ }
+          function Fail($m) { Write-Host "[FAIL] $m" -ForegroundColor Red; $script:failed++ }
+
+          # Check that client binary exists
+          if (-not (Test-Path "build/standalone/Release/GhostFS.exe")) {
+            Write-Error "Client binary not found"; exit 1
+          }
+          Pass "Client binary built"
+
+          # Check WinFSP installation
+          $winfspDll = "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
+          if (Test-Path $winfspDll) {
+            Pass "WinFSP DLL found"
+          } else {
+            Fail "WinFSP DLL not found"
+          }
+
+          # Check WinFSP Launcher service
+          $svc = Get-Service -Name "WinFsp.Launcher" -ErrorAction SilentlyContinue
+          if ($svc -and $svc.Status -eq "Running") {
+            Pass "WinFSP Launcher service running"
+          } else {
+            Fail "WinFSP Launcher service not running"
+          }
+
+          # Add WinFSP to PATH
+          $env:PATH = "C:\Program Files (x86)\WinFsp\bin;$env:PATH"
+
+          # Test client can show help (binary loads correctly)
+          $helpOutput = & "build/standalone/Release/GhostFS.exe" --help 2>&1 | Out-String
+          if ($helpOutput -match "GhostFS") {
+            Pass "Client binary loads and runs"
+          } else {
+            Fail "Client binary failed to run"
+          }
+
+          # Test server connectivity
+          $tcpClient = New-Object System.Net.Sockets.TcpClient
+          try {
+            $tcpClient.Connect("localhost", 3444)
+            Pass "Server reachable on localhost:3444"
+            $tcpClient.Close()
+          } catch {
+            Fail "Cannot connect to server: $_"
+          }
+
+          # Run internal file operation tests
+          # The --test flag runs tests from within the client process,
+          # bypassing Windows session isolation issues in CI
+          Write-Host "`nRunning file operation tests with --test mode..."
+          $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+          $pinfo.FileName = "build/standalone/Release/GhostFS.exe"
+          # Try drive letter mount again since directory mount showed GetFileAttributesW working
+          $pinfo.Arguments = "--client --host localhost --port 3444 -u testuser -t $env:TOKEN --test G:"
+          $pinfo.UseShellExecute = $false
+          $pinfo.RedirectStandardOutput = $true
+          $pinfo.RedirectStandardError = $true
+          $pinfo.CreateNoWindow = $true
+
+          $p = New-Object System.Diagnostics.Process
+          $p.StartInfo = $pinfo
+          $p.Start() | Out-Null
+
+          # Wait for test completion (timeout 60 seconds)
+          $completed = $p.WaitForExit(60000)
+
+          $stdout = $p.StandardOutput.ReadToEnd()
+          $stderr = $p.StandardError.ReadToEnd()
+
+          Write-Host "Client stdout:`n$stdout"
+          Write-Host "Client stderr:`n$stderr"
+
+          # Check test results
+          if (-not $completed) {
+            Fail "File operation tests timed out"
+            $p.Kill()
+          } elseif ($p.ExitCode -eq 0) {
+            Pass "All file operation tests passed"
+          } else {
+            Fail "File operation tests failed (exit code: $($p.ExitCode))"
+          }
+
+          Write-Host "`n=========================================="
+          Write-Host "Passed: $passed" -ForegroundColor Green
+          Write-Host "Failed: $failed" -ForegroundColor Red
+          Write-Host "==========================================`n"
+
+          if ($failed -gt 0) { exit 1 }
+
+      - name: Logs on failure
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Host "=== Client logs ==="
+          Get-Content "client.log", "client-err.log" -ErrorAction SilentlyContinue
+          Write-Host "=== Server logs ==="
+          wsl cat /tmp/server.log 2>$null
+
+      - name: Cleanup
+        if: always()
+        shell: powershell
+        run: |
+          Get-Process -Name "GhostFS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          wsl pkill -f GhostFS 2>$null
