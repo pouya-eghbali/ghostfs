@@ -261,9 +261,9 @@ On modern hardware, GhostFS achieves:
 |------|------------|
 | Large file write | 600+ MB/s |
 | Large file read | 600+ MB/s |
-| Small files (1000 x 4KB) | 2-6 MB/s |
+| Small files (1000 x 4KB) | 4-6 MB/s |
 
-Small file performance is limited by per-file RPC overhead. For workloads with many small files, consider batching or using larger cache sizes.
+Small file performance is limited by per-file RPC overhead.
 
 ## License
 

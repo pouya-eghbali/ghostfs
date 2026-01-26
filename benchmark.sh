@@ -129,23 +129,23 @@ mkdir -p "$MOUNT/bench"
 COPYOUT="/tmp/ghostfs-bench-out"
 mkdir -p "$COPYOUT"
 
-# Small files IN
+# Small files IN (parallel)
 log_info "Small files copy IN..."
 START=$(date +%s%3N)
-cp -r "$LOCAL_DIR/small/"* "$MOUNT/bench/"
+find "$LOCAL_DIR/small" -type f -print0 | xargs -0 -P 8 -I {} cp {} "$MOUNT/bench/"
 sync
 END=$(date +%s%3N)
 SMALL_IN_MS=$((END - START))
 SMALL_IN_THROUGHPUT=$(calc_throughput $TOTAL_SMALL $SMALL_IN_MS)
 log_result "Small files IN: ${SMALL_IN_MS}ms (${SMALL_IN_THROUGHPUT} MB/s)"
 
-# Small files OUT (pure read - no local disk write overhead)
+# Small files OUT (parallel read)
 log_info "Small files copy OUT..."
 if ! $IS_MACOS; then
     echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 fi
 START=$(date +%s%3N)
-find "$MOUNT/bench" -type f -exec cat {} \; > /dev/null
+find "$MOUNT/bench" -type f -print0 | xargs -0 -P 8 cat > /dev/null
 END=$(date +%s%3N)
 SMALL_OUT_MS=$((END - START))
 SMALL_OUT_THROUGHPUT=$(calc_throughput $TOTAL_SMALL $SMALL_OUT_MS)
