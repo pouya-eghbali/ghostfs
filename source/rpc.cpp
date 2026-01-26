@@ -922,8 +922,7 @@ public:
       return kj::READY_NOW;
     }
 
-    ::lseek(fh, off, SEEK_SET);
-    ssize_t res = ::read(fh, buf.data(), size);
+    ssize_t res = ::pread(fh, buf.data(), size, off);
     uint64_t bytesRead = res > 0 ? res : 0;
 
     int err = errno;
@@ -966,9 +965,7 @@ public:
       return kj::READY_NOW;
     }
 
-    ::lseek(fi.getFh(), req.getOff(), SEEK_SET);
-
-    ssize_t written = ::write(fi.getFh(), buf, req.getSize());
+    ssize_t written = ::pwrite(fi.getFh(), buf, req.getSize(), req.getOff());
     int err = errno;
 
     //std::cout << "write err: " << err << ", written: " << written
@@ -1012,8 +1009,7 @@ public:
         return kj::READY_NOW;
       }
 
-      ::lseek(fi.getFh(), req.getOff(), SEEK_SET);
-      size_t written = ::write(fi.getFh(), buf, req.getSize());
+      ssize_t written = ::pwrite(fi.getFh(), buf, req.getSize(), req.getOff());
       int err = errno;
 
       response[i].setRes(0);
