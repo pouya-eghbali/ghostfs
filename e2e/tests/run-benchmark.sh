@@ -57,11 +57,13 @@ trap cleanup EXIT
 # Format bytes to human readable
 format_size() {
     local bytes=$1
-    if [ $bytes -ge 1073741824 ]; then
+    # Handle floating point by truncating to integer for comparison
+    local int_bytes=$(echo "$bytes" | cut -d'.' -f1)
+    if [ "$int_bytes" -ge 1073741824 ] 2>/dev/null; then
         echo "$(echo "scale=2; $bytes / 1073741824" | bc) GB"
-    elif [ $bytes -ge 1048576 ]; then
+    elif [ "$int_bytes" -ge 1048576 ] 2>/dev/null; then
         echo "$(echo "scale=2; $bytes / 1048576" | bc) MB"
-    elif [ $bytes -ge 1024 ]; then
+    elif [ "$int_bytes" -ge 1024 ] 2>/dev/null; then
         echo "$(echo "scale=2; $bytes / 1024" | bc) KB"
     else
         echo "$bytes B"
@@ -218,9 +220,10 @@ COPYOUT_COUNT=$(ls "$COPYOUT_SMALL_DIR" | wc -l)
 log_info "Files copied out: $COPYOUT_COUNT (expected: $SMALL_FILE_COUNT)"
 
 # Verify integrity of small files
+# Use basename in awk to compare only filenames and hashes, not full paths
 log_info "Verifying small files integrity..."
-SMALL_HASH_LOCAL=$(find "$LOCAL_SMALL_DIR" -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
-SMALL_HASH_COPYOUT=$(find "$COPYOUT_SMALL_DIR" -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+SMALL_HASH_LOCAL=$(cd "$LOCAL_SMALL_DIR" && find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+SMALL_HASH_COPYOUT=$(cd "$COPYOUT_SMALL_DIR" && find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
 
 if [ "$SMALL_HASH_LOCAL" = "$SMALL_HASH_COPYOUT" ]; then
     log_result "Small files integrity: PASSED"
