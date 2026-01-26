@@ -255,15 +255,16 @@ docker run --rm --privileged --device /dev/fuse --cap-add SYS_ADMIN ghostfs-benc
 
 ### Expected Performance
 
-On modern hardware, GhostFS achieves:
+On Linux (Docker on M1 MacBook Pro, localhost):
 
 | Test | Throughput |
 |------|------------|
-| Large file write | 600+ MB/s |
-| Large file read | 600+ MB/s |
-| Small files (1000 x 4KB) | 4-6 MB/s |
+| Large file write (1GB) | ~590 MB/s |
+| Large file read (1GB) | ~640 MB/s |
+| Small files write (1000 x 4KB) | ~1140 files/s |
+| Small files read (1000 x 4KB) | ~1450 files/s |
 
-Small file performance is limited by per-file RPC overhead.
+Performance varies based on hardware, network latency, and cache settings. macOS performance is roughly 2x slower due to macFUSE overhead.
 
 ## License
 

@@ -31,6 +31,15 @@ else
     UNMOUNT_CMD="fusermount -u"
 fi
 
+# Get current time in milliseconds (cross-platform)
+get_ms() {
+    if $IS_MACOS; then
+        python3 -c 'import time; print(int(time.time() * 1000))'
+    else
+        date +%s%3N
+    fi
+}
+
 log_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 log_result() { echo -e "${GREEN}[RESULT]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
@@ -50,6 +59,15 @@ calc_throughput() {
     local bytes=$1 ms=$2
     if [ "$ms" -gt 0 ]; then
         echo "scale=2; $bytes / 1048576 * 1000 / $ms" | bc
+    else
+        echo "0"
+    fi
+}
+
+calc_files_per_second() {
+    local count=$1 ms=$2
+    if [ "$ms" -gt 0 ]; then
+        echo "scale=2; $count * 1000 / $ms" | bc
     else
         echo "0"
     fi
@@ -131,32 +149,32 @@ mkdir -p "$COPYOUT"
 
 # Small files IN (parallel)
 log_info "Small files copy IN..."
-START=$(date +%s%3N)
+START=$(get_ms)
 find "$LOCAL_DIR/small" -type f -print0 | xargs -0 -P 8 -I {} cp {} "$MOUNT/bench/"
 sync
-END=$(date +%s%3N)
+END=$(get_ms)
 SMALL_IN_MS=$((END - START))
-SMALL_IN_THROUGHPUT=$(calc_throughput $TOTAL_SMALL $SMALL_IN_MS)
-log_result "Small files IN: ${SMALL_IN_MS}ms (${SMALL_IN_THROUGHPUT} MB/s)"
+SMALL_IN_FPS=$(calc_files_per_second $SMALL_FILE_COUNT $SMALL_IN_MS)
+log_result "Small files IN: ${SMALL_IN_MS}ms (${SMALL_IN_FPS} files/s)"
 
 # Small files OUT (parallel read)
 log_info "Small files copy OUT..."
 if ! $IS_MACOS; then
     echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 fi
-START=$(date +%s%3N)
+START=$(get_ms)
 find "$MOUNT/bench" -type f -print0 | xargs -0 -P 8 cat > /dev/null
-END=$(date +%s%3N)
+END=$(get_ms)
 SMALL_OUT_MS=$((END - START))
-SMALL_OUT_THROUGHPUT=$(calc_throughput $TOTAL_SMALL $SMALL_OUT_MS)
-log_result "Small files OUT: ${SMALL_OUT_MS}ms (${SMALL_OUT_THROUGHPUT} MB/s)"
+SMALL_OUT_FPS=$(calc_files_per_second $SMALL_FILE_COUNT $SMALL_OUT_MS)
+log_result "Small files OUT: ${SMALL_OUT_MS}ms (${SMALL_OUT_FPS} files/s)"
 
 # Big file IN
 log_info "Big file copy IN..."
-START=$(date +%s%3N)
+START=$(get_ms)
 cp "$LOCAL_DIR/big.bin" "$MOUNT/big.bin"
 sync
-END=$(date +%s%3N)
+END=$(get_ms)
 BIG_IN_MS=$((END - START))
 BIG_IN_THROUGHPUT=$(calc_throughput $TOTAL_BIG $BIG_IN_MS)
 log_result "Big file IN: ${BIG_IN_MS}ms (${BIG_IN_THROUGHPUT} MB/s)"
@@ -166,9 +184,9 @@ log_info "Big file copy OUT..."
 if ! $IS_MACOS; then
     echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 fi
-START=$(date +%s%3N)
+START=$(get_ms)
 cat "$MOUNT/big.bin" > /dev/null
-END=$(date +%s%3N)
+END=$(get_ms)
 BIG_OUT_MS=$((END - START))
 BIG_OUT_THROUGHPUT=$(calc_throughput $TOTAL_BIG $BIG_OUT_MS)
 log_result "Big file OUT: ${BIG_OUT_MS}ms (${BIG_OUT_THROUGHPUT} MB/s)"
@@ -198,8 +216,8 @@ echo "============================================"
 echo "Summary"
 echo "============================================"
 echo "Small files (${SMALL_FILE_COUNT} x 4KB):"
-echo "  Write: ${SMALL_IN_THROUGHPUT} MB/s"
-echo "  Read:  ${SMALL_OUT_THROUGHPUT} MB/s"
+echo "  Write: ${SMALL_IN_FPS} files/s"
+echo "  Read:  ${SMALL_OUT_FPS} files/s"
 echo ""
 echo "Big file (${BIG_FILE_SIZE_MB}MB):"
 echo "  Write: ${BIG_IN_THROUGHPUT} MB/s"
