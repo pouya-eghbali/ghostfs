@@ -228,6 +228,43 @@ ghostfs --client \
   ...
 ```
 
+## Benchmarking
+
+GhostFS includes a benchmark suite to measure throughput on your hardware.
+
+### Native Benchmark
+
+```bash
+# Build first
+cmake -S standalone -B build/standalone
+cmake --build build/standalone -j$(nproc)
+
+# Run benchmark
+./benchmark.sh
+
+# With custom cache size
+GHOSTFS_CACHE=128 ./benchmark.sh
+```
+
+### Docker Benchmark (Linux)
+
+```bash
+docker build -f Dockerfile.benchmark -t ghostfs-bench .
+docker run --rm --privileged --device /dev/fuse --cap-add SYS_ADMIN ghostfs-bench
+```
+
+### Expected Performance
+
+On modern hardware, GhostFS achieves:
+
+| Test | Throughput |
+|------|------------|
+| Large file write | 600+ MB/s |
+| Large file read | 600+ MB/s |
+| Small files (1000 x 4KB) | 2-6 MB/s |
+
+Small file performance is limited by per-file RPC overhead. For workloads with many small files, consider batching or using larger cache sizes.
+
 ## License
 
 GhostFS is licensed under the [Business Source License 1.1](LICENSE).
