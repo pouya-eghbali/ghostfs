@@ -2,9 +2,6 @@ name: Build and Test CSI Driver
 
 on:
   push:
-    branches:
-      - master
-      - main
     tags:
       - 'v*'
   pull_request:
@@ -16,8 +13,22 @@ env:
   CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
 
 jobs:
+  # E2E tests run on PRs (builds in Docker)
+  e2e-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CSI E2E Tests
+        run: |
+          cd e2e
+          docker compose -f docker-compose.csi.yml up --build --exit-code-from ghostfs-csi
+
+  # Native build + release only on version tags
   build:
     runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
 
     steps:
       - uses: actions/checkout@v4
@@ -50,26 +61,12 @@ jobs:
         run: ./build/standalone/GhostFS --help | grep -i csi
 
       - name: Rename artifact
-        if: startsWith(github.ref, 'refs/tags/')
         run: mv build/standalone/GhostFS build/standalone/GhostFS-linux-csi
 
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: ncipollo/release-action@v1
         with:
           artifacts: "build/standalone/GhostFS-linux-csi"
           allowUpdates: true
           omitBodyDuringUpdate: true
           omitNameDuringUpdate: true
-
-  e2e-test:
-    runs-on: ubuntu-24.04
-    needs: build
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run CSI E2E Tests
-        run: |
-          cd e2e
-          docker compose -f docker-compose.csi.yml up --build --exit-code-from ghostfs-csi
