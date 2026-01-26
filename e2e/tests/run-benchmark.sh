@@ -9,8 +9,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-ROOT="${GHOSTFS_ROOT:-/data/root}"
-MOUNT="${GHOSTFS_MOUNT:-/mnt/ghostfs}"
+ROOT="${GHOSTFS_ROOT:-/tmp/ghostfs-root}"
+MOUNT="${GHOSTFS_MOUNT:-/tmp/ghostfs-mount}"
 HOST="${GHOSTFS_HOST:-127.0.0.1}"
 PORT="${GHOSTFS_PORT:-3444}"
 AUTH_PORT="${GHOSTFS_AUTH_PORT:-3445}"

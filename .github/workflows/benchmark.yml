@@ -17,16 +17,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libssl-dev zlib1g-dev cmake g++ fuse3 bc
+
+      - name: Build GhostFS
+        run: |
+          cmake -S standalone -B build/standalone
+          cmake --build build/standalone -j$(nproc)
+          sudo cp build/standalone/GhostFS /usr/local/bin/ghostfs
+
+      - name: Setup FUSE permissions
+        run: |
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf || true
 
       - name: Run Benchmarks
         run: |
-          cd e2e
-          docker compose -f docker-compose.benchmark.yml up --build --exit-code-from ghostfs
+          chmod +x e2e/tests/run-benchmark.sh
+          sudo e2e/tests/run-benchmark.sh
 
       - name: Cleanup
         if: always()
         run: |
-          cd e2e
-          docker compose -f docker-compose.benchmark.yml down --volumes --remove-orphans || true
+          sudo pkill -f "ghostfs.*--server" 2>/dev/null || true
+          sudo pkill -f "ghostfs.*--client" 2>/dev/null || true
+          sudo umount /mnt/ghostfs 2>/dev/null || true
