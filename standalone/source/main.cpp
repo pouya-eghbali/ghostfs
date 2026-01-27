@@ -1,3 +1,4 @@
+#include <ghostfs/benchmark.h>
 #include <ghostfs/fs.h>
 #include <ghostfs/ghostfs.h>
 #include <ghostfs/rpc.h>
@@ -5,7 +6,7 @@
 #include <sys/resource.h>
 
 #ifdef GHOSTFS_CSI_SUPPORT
-#include <ghostfs/csi.h>
+#  include <ghostfs/csi.h>
 #endif
 
 #include <cxxopts.hpp>
@@ -45,6 +46,13 @@ auto main(int argc, char** argv) -> int {
     ("U,unmount", "Soft unmount a directory")
     ("s,server", "Run in server mode")
     ("c,client", "Run in client mode")
+    ("B,benchmark", "Run filesystem benchmark")
+    ("D,dir", "Benchmark directory", cxxopts::value<std::string>()->default_value(""))
+    ("small-files", "Number of small files for benchmark", cxxopts::value<uint32_t>()->default_value("1000"))
+    ("small-size", "Size of small files in bytes", cxxopts::value<uint32_t>()->default_value("4096"))
+    ("large-size", "Size of large file in MB", cxxopts::value<uint32_t>()->default_value("1000"))
+    ("jobs", "Parallel jobs for benchmark", cxxopts::value<uint8_t>()->default_value("8"))
+    ("no-verify", "Skip integrity verification")
 #ifdef GHOSTFS_CSI_SUPPORT
     ("csi", "Run as CSI driver")
     ("csi-socket", "CSI socket path", cxxopts::value<std::string>()->default_value("/csi/csi.sock"))
@@ -151,6 +159,23 @@ auto main(int argc, char** argv) -> int {
     std::cout << "Starting GhostFS CSI driver..." << std::endl;
     return ghostfs::csi::start_csi_server(socket_path);
 #endif
+
+  } else if (result["benchmark"].as<bool>()) {
+    std::string dir = result["dir"].as<std::string>();
+    if (dir.empty()) {
+      std::cerr << "Error: --dir is required for benchmark mode" << std::endl;
+      return 1;
+    }
+
+    ghostfs::BenchmarkConfig config;
+    config.dir = dir;
+    config.small_file_count = result["small-files"].as<uint32_t>();
+    config.small_file_size = result["small-size"].as<uint32_t>();
+    config.large_file_size_mb = result["large-size"].as<uint32_t>();
+    config.parallel_jobs = result["jobs"].as<uint8_t>();
+    config.verify = !result["no-verify"].as<bool>();
+
+    return ghostfs::run_benchmark(config);
   }
 
   // No mode specified - show help

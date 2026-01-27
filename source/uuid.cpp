@@ -1,7 +1,7 @@
 #include <ghostfs/uuid.h>
 
 #ifdef USE_UUID_V4
-#include <uuid_v4.h>
+#  include <uuid_v4.h>
 
 UUIDv4::UUIDGenerator<std::mt19937_64> uuidGenerator;
 
@@ -12,9 +12,9 @@ std::string gen_uuid() {
 
 #else
 // Cross-platform fallback for ARM and other non-x86 platforms
-#include <random>
-#include <sstream>
-#include <iomanip>
+#  include <iomanip>
+#  include <random>
+#  include <sstream>
 
 std::string gen_uuid() {
   static thread_local std::mt19937_64 gen(std::random_device{}());

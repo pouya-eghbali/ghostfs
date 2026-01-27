@@ -1620,7 +1620,6 @@ public:
 
     if (isValid) {
       res.setGhostFs(kj::heap<GhostFSImpl>(user, root, suffix));
-      std::cout << "User " << user << "connected.";
     }
 
     return kj::READY_NOW;
