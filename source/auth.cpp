@@ -32,7 +32,7 @@ std::string add_token(std::string user, std::string token, int64_t retries) {
   tokens[token_to_add] = {.user = user, .usable = retries, .has_active_session = false};
 
   if (not users.contains(user)) {
-    users[user] = {.sub_directory = user};
+    users[user] = {.sub_directory = user, .soft_mounts = {}};
   }
 
   return token_to_add;

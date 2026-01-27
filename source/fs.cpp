@@ -31,8 +31,8 @@
 #include <mutex>
 
 // Timeout constants (milliseconds)
-constexpr uint64_t CONNECTION_TIMEOUT_MS = 5000;   // 5 seconds for connection
-constexpr uint64_t RPC_TIMEOUT_MS = 30000;         // 30 seconds for RPC calls
+constexpr uint64_t CONNECTION_TIMEOUT_MS = 5000;  // 5 seconds for connection
+constexpr uint64_t RPC_TIMEOUT_MS = 30000;        // 30 seconds for RPC calls
 
 // CAPNPROTO
 
@@ -130,15 +130,13 @@ struct ThreadLocalRpc {
   std::optional<GhostFS::Client> client;
   bool initialized = false;
 
-  kj::Timer& getTimer() {
-    return ioContext->provider->getTimer();
-  }
+  kj::Timer &getTimer() { return ioContext->provider->getTimer(); }
 
   void init() {
     if (initialized) return;
 
     ioContext = std::make_unique<kj::AsyncIoContext>(kj::setupAsyncIo());
-    auto& timer = ioContext->provider->getTimer();
+    auto &timer = ioContext->provider->getTimer();
 
     if (g_conn_params.cert.length()) {
       kj::TlsContext::Options options;
@@ -151,39 +149,37 @@ struct ThreadLocalRpc {
       // DNS resolution with timeout
       auto addressPromise = network->parseAddress(g_conn_params.host, g_conn_params.port);
       auto addressTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::NetworkAddress> {
-            KJ_FAIL_REQUIRE("DNS resolution timed out");
-          });
-      auto address = addressPromise.exclusiveJoin(kj::mv(addressTimeout))
-          .wait(ioContext->waitScope);
+                                .then([]() -> kj::Own<kj::NetworkAddress> {
+                                  KJ_FAIL_REQUIRE("DNS resolution timed out");
+                                });
+      auto address
+          = addressPromise.exclusiveJoin(kj::mv(addressTimeout)).wait(ioContext->waitScope);
 
       // TCP connection with timeout
       auto connectPromise = address->connect();
       auto connectTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::AsyncIoStream> {
-            KJ_FAIL_REQUIRE("Connection timed out");
-          });
-      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout))
-          .wait(ioContext->waitScope);
+                                .then([]() -> kj::Own<kj::AsyncIoStream> {
+                                  KJ_FAIL_REQUIRE("Connection timed out");
+                                });
+      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout)).wait(ioContext->waitScope);
     } else {
       // DNS resolution with timeout
-      auto addressPromise = ioContext->provider->getNetwork()
-          .parseAddress(g_conn_params.host, g_conn_params.port);
+      auto addressPromise
+          = ioContext->provider->getNetwork().parseAddress(g_conn_params.host, g_conn_params.port);
       auto addressTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::NetworkAddress> {
-            KJ_FAIL_REQUIRE("DNS resolution timed out");
-          });
-      auto address = addressPromise.exclusiveJoin(kj::mv(addressTimeout))
-          .wait(ioContext->waitScope);
+                                .then([]() -> kj::Own<kj::NetworkAddress> {
+                                  KJ_FAIL_REQUIRE("DNS resolution timed out");
+                                });
+      auto address
+          = addressPromise.exclusiveJoin(kj::mv(addressTimeout)).wait(ioContext->waitScope);
 
       // TCP connection with timeout
       auto connectPromise = address->connect();
       auto connectTimeout = timer.afterDelay(CONNECTION_TIMEOUT_MS * kj::MILLISECONDS)
-          .then([]() -> kj::Own<kj::AsyncIoStream> {
-            KJ_FAIL_REQUIRE("Connection timed out");
-          });
-      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout))
-          .wait(ioContext->waitScope);
+                                .then([]() -> kj::Own<kj::AsyncIoStream> {
+                                  KJ_FAIL_REQUIRE("Connection timed out");
+                                });
+      connection = connectPromise.exclusiveJoin(kj::mv(connectTimeout)).wait(ioContext->waitScope);
     }
 
     twoParty = std::make_unique<capnp::TwoPartyClient>(*connection);
@@ -196,11 +192,10 @@ struct ThreadLocalRpc {
     // Auth RPC with timeout
     auto authPromise = request.send();
     auto authTimeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS)
-        .then([]() -> capnp::Response<GhostFSAuth::AuthResults> {
-          KJ_FAIL_REQUIRE("Authentication timed out");
-        });
-    auto result = authPromise.exclusiveJoin(kj::mv(authTimeout))
-        .wait(ioContext->waitScope);
+                           .then([]() -> capnp::Response<GhostFSAuth::AuthResults> {
+                             KJ_FAIL_REQUIRE("Authentication timed out");
+                           });
+    auto result = authPromise.exclusiveJoin(kj::mv(authTimeout)).wait(ioContext->waitScope);
 
     if (!result.getAuthSuccess()) {
       throw std::runtime_error("Thread-local authentication failed");
@@ -214,20 +209,19 @@ struct ThreadLocalRpc {
 thread_local ThreadLocalRpc tl_rpc;
 
 // Helper to get thread-local RPC client
-inline ThreadLocalRpc& getRpc() {
+inline ThreadLocalRpc &getRpc() {
   tl_rpc.init();
   return tl_rpc;
 }
 
 // Helper for RPC calls with timeout - uses template deduction to avoid explicit type annotations
-template<typename Promise>
-auto waitWithTimeout(Promise&& promise, kj::Timer& timer, kj::WaitScope& waitScope)
+template <typename Promise>
+auto waitWithTimeout(Promise &&promise, kj::Timer &timer, kj::WaitScope &waitScope)
     -> decltype(kj::fwd<Promise>(promise).wait(waitScope)) {
   using ResultType = decltype(kj::fwd<Promise>(promise).wait(waitScope));
-  auto timeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS)
-      .then([]() -> ResultType {
-        KJ_FAIL_REQUIRE("RPC timeout");
-      });
+  auto timeout = timer.afterDelay(RPC_TIMEOUT_MS * kj::MILLISECONDS).then([]() -> ResultType {
+    KJ_FAIL_REQUIRE("RPC timeout");
+  });
   return kj::fwd<Promise>(promise).exclusiveJoin(kj::mv(timeout)).wait(waitScope);
 }
 
@@ -395,7 +389,7 @@ static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
     attr.st_blocks = attributes.getStBlocks();
 
     fuse_reply_attr(req, &attr, 1.0);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "getattr error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -458,7 +452,7 @@ static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *nam
     e.attr.st_blocks = attributes.getStBlocks();
 
     fuse_reply_entry(req, &e);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "lookup error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -522,7 +516,7 @@ static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_
     }
 
     reply_buf_limited(req, b.p, b.size, off, size);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "readdir error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -578,7 +572,7 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
     fi->fh = fi_response.getFh();
 
     fuse_reply_open(req, fi);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "open error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -657,7 +651,7 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
       memcpy(cache.buf, buf, res);
       read_ahead_cache[fi->fh] = cache;
     }
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -727,7 +721,7 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
     const char *buf = chars.begin();
 
     fuse_reply_buf(req, buf, res);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "read error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -802,7 +796,7 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
         fuse_reply_write(req, response[cached - 1].getWritten());
       }
     }
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "flush_write_back_cache error: " << e.getDescription().cStr() << std::endl;
     if (reply && cached > 0) {
       fuse_reply_err(entries_to_flush[cached - 1].req, ETIMEDOUT);
@@ -891,7 +885,7 @@ static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, si
     }
 
     fuse_reply_write(req, response.getWritten());
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "write error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -916,7 +910,7 @@ static void ghostfs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *nam
     int err = response.getErrno();
 
     fuse_reply_err(req, res == -1 ? err : 0);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "unlink error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -941,7 +935,7 @@ static void ghostfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name
     int err = response.getErrno();
 
     fuse_reply_err(req, res == -1 ? err : 0);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "rmdir error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -995,7 +989,7 @@ static void ghostfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
 
       fuse_reply_entry(req, &e);
     }
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "symlink error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1059,7 +1053,7 @@ static void ghostfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name
     e.attr.st_blocks = attributes.getStBlocks();
 
     fuse_reply_entry(req, &e);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "mknod error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1094,7 +1088,7 @@ static void ghostfs_ll_access(fuse_req_t req, fuse_ino_t ino, int mask) {
     } else {
       fuse_reply_err(req, 0);
     }
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "access error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1181,7 +1175,7 @@ static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *nam
     fi->fh = fi_response.getFh();
 
     fuse_reply_create(req, &e, fi);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "create error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1242,7 +1236,7 @@ static void ghostfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name
     e.attr.st_blocks = attributes.getStBlocks();
 
     fuse_reply_entry(req, &e);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "mkdir error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1270,7 +1264,7 @@ static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
     int err = response.getErrno();
 
     fuse_reply_err(req, res == -1 ? err : 0);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "rename error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1307,9 +1301,15 @@ static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
     int err = response.getErrno();
 
     fuse_reply_err(req, res == -1 ? err : 0);
-  } catch (const kj::Exception& e) {
-    std::cerr << "release error: " << e.getDescription().cStr() << std::endl;
-    fuse_reply_err(req, ETIMEDOUT);
+  } catch (const kj::Exception &e) {
+    // Peer disconnect during release is expected during shutdown - reply success
+    // since the file handle is being closed anyway
+    if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+      fuse_reply_err(req, 0);
+    } else {
+      std::cerr << "release error: " << e.getDescription().cStr() << std::endl;
+      fuse_reply_err(req, ETIMEDOUT);
+    }
   }
 }
 
@@ -1343,9 +1343,14 @@ static void ghostfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_in
     int err = response.getErrno();
 
     fuse_reply_err(req, res == -1 ? err : 0);
-  } catch (const kj::Exception& e) {
-    std::cerr << "flush error: " << e.getDescription().cStr() << std::endl;
-    fuse_reply_err(req, ETIMEDOUT);
+  } catch (const kj::Exception &e) {
+    // Peer disconnect during flush is expected during shutdown
+    if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+      fuse_reply_err(req, 0);
+    } else {
+      std::cerr << "flush error: " << e.getDescription().cStr() << std::endl;
+      fuse_reply_err(req, ETIMEDOUT);
+    }
   }
 }
 
@@ -1382,7 +1387,7 @@ static void ghostfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
     int err = response.getErrno();
 
     fuse_reply_err(req, res == -1 ? err : 0);
-  } catch (const kj::Exception& e) {
+  } catch (const kj::Exception &e) {
     std::cerr << "fsync error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
@@ -1550,6 +1555,8 @@ static void ghostfs_ll_readlink(fuse_req_t req, fuse_ino_t ino) {
 }
 
 // clang-format off
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 static const struct fuse_lowlevel_ops ghostfs_ll_oper = {
     .lookup = ghostfs_ll_lookup,
     .getattr = ghostfs_ll_getattr,
@@ -1574,6 +1581,7 @@ static const struct fuse_lowlevel_ops ghostfs_ll_oper = {
     .access = ghostfs_ll_access,
     .create = ghostfs_ll_create,
 };
+#pragma GCC diagnostic pop
 // clang-format on
 
 std::string read_file(const std::string &path);
@@ -1623,7 +1631,7 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
   try {
     (void)getRpc();
     std::cout << "Connected to the GhostFS server." << std::endl;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cout << "Authentication failed: " << e.what() << std::endl;
     return 1;
   }
