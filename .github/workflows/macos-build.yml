@@ -1,0 +1,49 @@
+name: Build For macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-13
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: "**/cpm_modules"
+          key: ${{ github.workflow }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}
+
+      - name: Install Dependencies
+        run: brew install macfuse
+
+      - name: Configure
+        run: cmake -S standalone -B build/standalone
+
+      - name: Build
+        run: cmake --build build/standalone -j3
+
+      - name: Rename artifact
+        run: mv build/standalone/GhostFS build/standalone/GhostFS-macos-${{ matrix.arch }}
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "build/standalone/GhostFS-macos-${{ matrix.arch }}"
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
