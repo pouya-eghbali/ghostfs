@@ -3,7 +3,7 @@ name: Build For macOS
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
@@ -13,8 +13,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-26-large
-            arch: x86_64
           - os: macos-26
             arch: arm64
 
