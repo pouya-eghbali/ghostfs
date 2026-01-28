@@ -1879,8 +1879,13 @@ int start_rpc_server(std::string bind, int port, int auth_port, std::string root
                      std::string suffix, std::string key_file, std::string cert_file) {
   if (root.length() > 0) {
     if (not std::filesystem::is_directory(root)) {
-      std::cout << "ERROR: directory " << '"' << root << '"' << " does not exist." << std::endl;
-      return 1;
+      std::error_code ec;
+      std::filesystem::create_directories(root, ec);
+      if (ec || !std::filesystem::is_directory(root)) {
+        std::cout << "ERROR: failed to create directory " << '"' << root << '"' << std::endl;
+        return 1;
+      }
+      std::cout << "Created root directory: " << root << std::endl;
     };
   }
 
@@ -1965,8 +1970,13 @@ void start_rpc_server_async(std::string bind, uint16_t port, uint16_t auth_port,
   std::thread([bind, port, auth_port, root, suffix, key_file, cert_file]() {
     if (root.length() > 0) {
       if (!std::filesystem::is_directory(root)) {
-        std::cerr << "ERROR: directory " << '"' << root << '"' << " does not exist." << std::endl;
-        return;
+        std::error_code ec;
+        std::filesystem::create_directories(root, ec);
+        if (ec || !std::filesystem::is_directory(root)) {
+          std::cerr << "ERROR: failed to create directory " << '"' << root << '"' << std::endl;
+          return;
+        }
+        std::cout << "Created root directory: " << root << std::endl;
       }
     }
 
