@@ -17,6 +17,12 @@
 
 #include "access.capnp.h"
 #include "access.response.capnp.h"
+#include "bulkread.capnp.h"
+#include "bulkread.response.capnp.h"
+#include "bulkupload.capnp.h"
+#include "bulkupload.response.capnp.h"
+#include "copyfile.capnp.h"
+#include "copyfile.response.capnp.h"
 #include "create.capnp.h"
 #include "create.response.capnp.h"
 #include "flush.capnp.h"
@@ -118,6 +124,12 @@ CAPNP_DECLARE_SCHEMA(ccc9596da27864a4);
 CAPNP_DECLARE_SCHEMA(cda952998305cbd8);
 CAPNP_DECLARE_SCHEMA(f7ae135839e59663);
 CAPNP_DECLARE_SCHEMA(9692a24c11fa4f46);
+CAPNP_DECLARE_SCHEMA(c84f236665178215);
+CAPNP_DECLARE_SCHEMA(b1e87637066f9e96);
+CAPNP_DECLARE_SCHEMA(a996b0c3006982b3);
+CAPNP_DECLARE_SCHEMA(ca4ad7e8f10552a4);
+CAPNP_DECLARE_SCHEMA(d4df2e13b16c5223);
+CAPNP_DECLARE_SCHEMA(978f4e9119ad7b4c);
 
 }  // namespace schemas
 }  // namespace capnp
@@ -399,6 +411,12 @@ struct GhostFS {
   struct FsyncResults;
   struct BulkWriteParams;
   struct BulkWriteResults;
+  struct CopyFileParams;
+  struct CopyFileResults;
+  struct BulkReadParams;
+  struct BulkReadResults;
+  struct BulkUploadParams;
+  struct BulkUploadResults;
 
   #if !CAPNP_LITE
   struct _capnpPrivate {
@@ -1032,6 +1050,96 @@ struct GhostFS::BulkWriteResults {
 
   struct _capnpPrivate {
     CAPNP_DECLARE_STRUCT_HEADER(9692a24c11fa4f46, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::CopyFileParams {
+  CopyFileParams() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(c84f236665178215, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::CopyFileResults {
+  CopyFileResults() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(b1e87637066f9e96, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::BulkReadParams {
+  BulkReadParams() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(a996b0c3006982b3, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::BulkReadResults {
+  BulkReadResults() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(ca4ad7e8f10552a4, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::BulkUploadParams {
+  BulkUploadParams() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(d4df2e13b16c5223, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::BulkUploadResults {
+  BulkUploadResults() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(978f4e9119ad7b4c, 0, 1)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -2259,6 +2367,12 @@ public:
       ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
   ::capnp::Request< ::GhostFS::BulkWriteParams,  ::GhostFS::BulkWriteResults> bulkWriteRequest(
       ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
+  ::capnp::Request< ::GhostFS::CopyFileParams,  ::GhostFS::CopyFileResults> copyFileRequest(
+      ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
+  ::capnp::Request< ::GhostFS::BulkReadParams,  ::GhostFS::BulkReadResults> bulkReadRequest(
+      ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
+  ::capnp::Request< ::GhostFS::BulkUploadParams,  ::GhostFS::BulkUploadResults> bulkUploadRequest(
+      ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
 
 protected:
   Client() = default;
@@ -2359,6 +2473,18 @@ protected:
   typedef  ::GhostFS::BulkWriteResults BulkWriteResults;
   typedef ::capnp::CallContext<BulkWriteParams, BulkWriteResults> BulkWriteContext;
   virtual ::kj::Promise<void> bulkWrite(BulkWriteContext context);
+  typedef  ::GhostFS::CopyFileParams CopyFileParams;
+  typedef  ::GhostFS::CopyFileResults CopyFileResults;
+  typedef ::capnp::CallContext<CopyFileParams, CopyFileResults> CopyFileContext;
+  virtual ::kj::Promise<void> copyFile(CopyFileContext context);
+  typedef  ::GhostFS::BulkReadParams BulkReadParams;
+  typedef  ::GhostFS::BulkReadResults BulkReadResults;
+  typedef ::capnp::CallContext<BulkReadParams, BulkReadResults> BulkReadContext;
+  virtual ::kj::Promise<void> bulkRead(BulkReadContext context);
+  typedef  ::GhostFS::BulkUploadParams BulkUploadParams;
+  typedef  ::GhostFS::BulkUploadResults BulkUploadResults;
+  typedef ::capnp::CallContext<BulkUploadParams, BulkUploadResults> BulkUploadContext;
+  virtual ::kj::Promise<void> bulkUpload(BulkUploadContext context);
 
   inline  ::GhostFS::Client thisCap() {
     return ::capnp::Capability::Server::thisCap()
@@ -5813,6 +5939,498 @@ private:
 };
 #endif  // !CAPNP_LITE
 
+class GhostFS::CopyFileParams::Reader {
+public:
+  typedef CopyFileParams Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq() const;
+  inline  ::CopyFile::Reader getReq() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::CopyFileParams::Builder {
+public:
+  typedef CopyFileParams Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq();
+  inline  ::CopyFile::Builder getReq();
+  inline void setReq( ::CopyFile::Reader value);
+  inline  ::CopyFile::Builder initReq();
+  inline void adoptReq(::capnp::Orphan< ::CopyFile>&& value);
+  inline ::capnp::Orphan< ::CopyFile> disownReq();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::CopyFileParams::Pipeline {
+public:
+  typedef CopyFileParams Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::CopyFile::Pipeline getReq();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class GhostFS::CopyFileResults::Reader {
+public:
+  typedef CopyFileResults Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes() const;
+  inline  ::CopyFileResponse::Reader getRes() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::CopyFileResults::Builder {
+public:
+  typedef CopyFileResults Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes();
+  inline  ::CopyFileResponse::Builder getRes();
+  inline void setRes( ::CopyFileResponse::Reader value);
+  inline  ::CopyFileResponse::Builder initRes();
+  inline void adoptRes(::capnp::Orphan< ::CopyFileResponse>&& value);
+  inline ::capnp::Orphan< ::CopyFileResponse> disownRes();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::CopyFileResults::Pipeline {
+public:
+  typedef CopyFileResults Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::CopyFileResponse::Pipeline getRes();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class GhostFS::BulkReadParams::Reader {
+public:
+  typedef BulkReadParams Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq() const;
+  inline  ::BulkRead::Reader getReq() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::BulkReadParams::Builder {
+public:
+  typedef BulkReadParams Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq();
+  inline  ::BulkRead::Builder getReq();
+  inline void setReq( ::BulkRead::Reader value);
+  inline  ::BulkRead::Builder initReq();
+  inline void adoptReq(::capnp::Orphan< ::BulkRead>&& value);
+  inline ::capnp::Orphan< ::BulkRead> disownReq();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::BulkReadParams::Pipeline {
+public:
+  typedef BulkReadParams Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::BulkRead::Pipeline getReq();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class GhostFS::BulkReadResults::Reader {
+public:
+  typedef BulkReadResults Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes() const;
+  inline  ::BulkReadResponse::Reader getRes() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::BulkReadResults::Builder {
+public:
+  typedef BulkReadResults Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes();
+  inline  ::BulkReadResponse::Builder getRes();
+  inline void setRes( ::BulkReadResponse::Reader value);
+  inline  ::BulkReadResponse::Builder initRes();
+  inline void adoptRes(::capnp::Orphan< ::BulkReadResponse>&& value);
+  inline ::capnp::Orphan< ::BulkReadResponse> disownRes();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::BulkReadResults::Pipeline {
+public:
+  typedef BulkReadResults Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::BulkReadResponse::Pipeline getRes();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class GhostFS::BulkUploadParams::Reader {
+public:
+  typedef BulkUploadParams Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq() const;
+  inline  ::BulkUpload::Reader getReq() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::BulkUploadParams::Builder {
+public:
+  typedef BulkUploadParams Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq();
+  inline  ::BulkUpload::Builder getReq();
+  inline void setReq( ::BulkUpload::Reader value);
+  inline  ::BulkUpload::Builder initReq();
+  inline void adoptReq(::capnp::Orphan< ::BulkUpload>&& value);
+  inline ::capnp::Orphan< ::BulkUpload> disownReq();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::BulkUploadParams::Pipeline {
+public:
+  typedef BulkUploadParams Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::BulkUpload::Pipeline getReq();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class GhostFS::BulkUploadResults::Reader {
+public:
+  typedef BulkUploadResults Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes() const;
+  inline  ::BulkUploadResponse::Reader getRes() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::BulkUploadResults::Builder {
+public:
+  typedef BulkUploadResults Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes();
+  inline  ::BulkUploadResponse::Builder getRes();
+  inline void setRes( ::BulkUploadResponse::Reader value);
+  inline  ::BulkUploadResponse::Builder initRes();
+  inline void adoptRes(::capnp::Orphan< ::BulkUploadResponse>&& value);
+  inline ::capnp::Orphan< ::BulkUploadResponse> disownRes();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::BulkUploadResults::Pipeline {
+public:
+  typedef BulkUploadResults Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::BulkUploadResponse::Pipeline getRes();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
 // =======================================================================================
 
 #if !CAPNP_LITE
@@ -8081,6 +8699,240 @@ inline void GhostFS::BulkWriteResults::Builder::adoptRes(
 }
 inline ::capnp::Orphan< ::capnp::List< ::WriteResponse,  ::capnp::Kind::STRUCT>> GhostFS::BulkWriteResults::Builder::disownRes() {
   return ::capnp::_::PointerHelpers< ::capnp::List< ::WriteResponse,  ::capnp::Kind::STRUCT>>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::CopyFileParams::Reader::hasReq() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::CopyFileParams::Builder::hasReq() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::CopyFile::Reader GhostFS::CopyFileParams::Reader::getReq() const {
+  return ::capnp::_::PointerHelpers< ::CopyFile>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::CopyFile::Builder GhostFS::CopyFileParams::Builder::getReq() {
+  return ::capnp::_::PointerHelpers< ::CopyFile>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::CopyFile::Pipeline GhostFS::CopyFileParams::Pipeline::getReq() {
+  return  ::CopyFile::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::CopyFileParams::Builder::setReq( ::CopyFile::Reader value) {
+  ::capnp::_::PointerHelpers< ::CopyFile>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::CopyFile::Builder GhostFS::CopyFileParams::Builder::initReq() {
+  return ::capnp::_::PointerHelpers< ::CopyFile>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::CopyFileParams::Builder::adoptReq(
+    ::capnp::Orphan< ::CopyFile>&& value) {
+  ::capnp::_::PointerHelpers< ::CopyFile>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::CopyFile> GhostFS::CopyFileParams::Builder::disownReq() {
+  return ::capnp::_::PointerHelpers< ::CopyFile>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::CopyFileResults::Reader::hasRes() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::CopyFileResults::Builder::hasRes() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::CopyFileResponse::Reader GhostFS::CopyFileResults::Reader::getRes() const {
+  return ::capnp::_::PointerHelpers< ::CopyFileResponse>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::CopyFileResponse::Builder GhostFS::CopyFileResults::Builder::getRes() {
+  return ::capnp::_::PointerHelpers< ::CopyFileResponse>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::CopyFileResponse::Pipeline GhostFS::CopyFileResults::Pipeline::getRes() {
+  return  ::CopyFileResponse::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::CopyFileResults::Builder::setRes( ::CopyFileResponse::Reader value) {
+  ::capnp::_::PointerHelpers< ::CopyFileResponse>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::CopyFileResponse::Builder GhostFS::CopyFileResults::Builder::initRes() {
+  return ::capnp::_::PointerHelpers< ::CopyFileResponse>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::CopyFileResults::Builder::adoptRes(
+    ::capnp::Orphan< ::CopyFileResponse>&& value) {
+  ::capnp::_::PointerHelpers< ::CopyFileResponse>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::CopyFileResponse> GhostFS::CopyFileResults::Builder::disownRes() {
+  return ::capnp::_::PointerHelpers< ::CopyFileResponse>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::BulkReadParams::Reader::hasReq() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::BulkReadParams::Builder::hasReq() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::BulkRead::Reader GhostFS::BulkReadParams::Reader::getReq() const {
+  return ::capnp::_::PointerHelpers< ::BulkRead>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::BulkRead::Builder GhostFS::BulkReadParams::Builder::getReq() {
+  return ::capnp::_::PointerHelpers< ::BulkRead>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::BulkRead::Pipeline GhostFS::BulkReadParams::Pipeline::getReq() {
+  return  ::BulkRead::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::BulkReadParams::Builder::setReq( ::BulkRead::Reader value) {
+  ::capnp::_::PointerHelpers< ::BulkRead>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::BulkRead::Builder GhostFS::BulkReadParams::Builder::initReq() {
+  return ::capnp::_::PointerHelpers< ::BulkRead>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::BulkReadParams::Builder::adoptReq(
+    ::capnp::Orphan< ::BulkRead>&& value) {
+  ::capnp::_::PointerHelpers< ::BulkRead>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::BulkRead> GhostFS::BulkReadParams::Builder::disownReq() {
+  return ::capnp::_::PointerHelpers< ::BulkRead>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::BulkReadResults::Reader::hasRes() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::BulkReadResults::Builder::hasRes() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::BulkReadResponse::Reader GhostFS::BulkReadResults::Reader::getRes() const {
+  return ::capnp::_::PointerHelpers< ::BulkReadResponse>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::BulkReadResponse::Builder GhostFS::BulkReadResults::Builder::getRes() {
+  return ::capnp::_::PointerHelpers< ::BulkReadResponse>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::BulkReadResponse::Pipeline GhostFS::BulkReadResults::Pipeline::getRes() {
+  return  ::BulkReadResponse::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::BulkReadResults::Builder::setRes( ::BulkReadResponse::Reader value) {
+  ::capnp::_::PointerHelpers< ::BulkReadResponse>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::BulkReadResponse::Builder GhostFS::BulkReadResults::Builder::initRes() {
+  return ::capnp::_::PointerHelpers< ::BulkReadResponse>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::BulkReadResults::Builder::adoptRes(
+    ::capnp::Orphan< ::BulkReadResponse>&& value) {
+  ::capnp::_::PointerHelpers< ::BulkReadResponse>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::BulkReadResponse> GhostFS::BulkReadResults::Builder::disownRes() {
+  return ::capnp::_::PointerHelpers< ::BulkReadResponse>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::BulkUploadParams::Reader::hasReq() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::BulkUploadParams::Builder::hasReq() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::BulkUpload::Reader GhostFS::BulkUploadParams::Reader::getReq() const {
+  return ::capnp::_::PointerHelpers< ::BulkUpload>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::BulkUpload::Builder GhostFS::BulkUploadParams::Builder::getReq() {
+  return ::capnp::_::PointerHelpers< ::BulkUpload>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::BulkUpload::Pipeline GhostFS::BulkUploadParams::Pipeline::getReq() {
+  return  ::BulkUpload::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::BulkUploadParams::Builder::setReq( ::BulkUpload::Reader value) {
+  ::capnp::_::PointerHelpers< ::BulkUpload>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::BulkUpload::Builder GhostFS::BulkUploadParams::Builder::initReq() {
+  return ::capnp::_::PointerHelpers< ::BulkUpload>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::BulkUploadParams::Builder::adoptReq(
+    ::capnp::Orphan< ::BulkUpload>&& value) {
+  ::capnp::_::PointerHelpers< ::BulkUpload>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::BulkUpload> GhostFS::BulkUploadParams::Builder::disownReq() {
+  return ::capnp::_::PointerHelpers< ::BulkUpload>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::BulkUploadResults::Reader::hasRes() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::BulkUploadResults::Builder::hasRes() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::BulkUploadResponse::Reader GhostFS::BulkUploadResults::Reader::getRes() const {
+  return ::capnp::_::PointerHelpers< ::BulkUploadResponse>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::BulkUploadResponse::Builder GhostFS::BulkUploadResults::Builder::getRes() {
+  return ::capnp::_::PointerHelpers< ::BulkUploadResponse>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::BulkUploadResponse::Pipeline GhostFS::BulkUploadResults::Pipeline::getRes() {
+  return  ::BulkUploadResponse::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::BulkUploadResults::Builder::setRes( ::BulkUploadResponse::Reader value) {
+  ::capnp::_::PointerHelpers< ::BulkUploadResponse>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::BulkUploadResponse::Builder GhostFS::BulkUploadResults::Builder::initRes() {
+  return ::capnp::_::PointerHelpers< ::BulkUploadResponse>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::BulkUploadResults::Builder::adoptRes(
+    ::capnp::Orphan< ::BulkUploadResponse>&& value) {
+  ::capnp::_::PointerHelpers< ::BulkUploadResponse>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::BulkUploadResponse> GhostFS::BulkUploadResults::Builder::disownRes() {
+  return ::capnp::_::PointerHelpers< ::BulkUploadResponse>::disown(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 

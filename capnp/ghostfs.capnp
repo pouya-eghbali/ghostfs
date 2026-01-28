@@ -40,6 +40,12 @@ using import "flush.capnp".Flush;
 using import "flush.response.capnp".FlushResponse;
 using import "fsync.capnp".Fsync;
 using import "fsync.response.capnp".FsyncResponse;
+using import "copyfile.capnp".CopyFile;
+using import "copyfile.response.capnp".CopyFileResponse;
+using import "bulkread.capnp".BulkRead;
+using import "bulkread.response.capnp".BulkReadResponse;
+using import "bulkupload.capnp".BulkUpload;
+using import "bulkupload.response.capnp".BulkUploadResponse;
 
 interface GhostFSAuthServer {
   authorize   @0 (user :Text, token :Text, retries :Int64, expires :UInt64) -> (token :Text);
@@ -76,5 +82,8 @@ interface GhostFS {
   fsync    @19 (req :Fsync)    -> (res :FsyncResponse);
   
   # Special methods (non-fuse)
-  bulkWrite @20 (req :List(Write))         -> (res :List(WriteResponse));
+  bulkWrite  @20 (req :List(Write))  -> (res :List(WriteResponse));
+  copyFile   @21 (req :CopyFile)     -> (res :CopyFileResponse);
+  bulkRead   @22 (req :BulkRead)     -> (res :BulkReadResponse);
+  bulkUpload @23 (req :BulkUpload)   -> (res :BulkUploadResponse);
 }

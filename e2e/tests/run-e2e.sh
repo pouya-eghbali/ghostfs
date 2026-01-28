@@ -621,6 +621,143 @@ run_encryption_tests() {
 run_encryption_tests
 
 # ============================================================================
+# Fast Copy Tests
+# ============================================================================
+
+run_fast_copy_tests() {
+    echo ""
+    log_info "============================================"
+    log_info "Running fast copy tests..."
+    log_info "============================================"
+    echo ""
+
+    # Unmount current client if mounted with encryption
+    if mountpoint -q "$MOUNT" 2>/dev/null; then
+        fusermount -u "$MOUNT" 2>/dev/null || umount "$MOUNT" 2>/dev/null || true
+        sleep 1
+    fi
+
+    # Clean up user directory for fresh copy tests
+    rm -rf "$ROOT/$USER"/*
+
+    # Remount without encryption for copy tests
+    ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
+        --write-back 32 --read-ahead 32 "$MOUNT" &
+    sleep 2
+
+    if ! mountpoint -q "$MOUNT"; then
+        log_fail "Fast copy setup - failed to remount"
+        return 1
+    fi
+
+    # Test: Fast copy upload (local -> GhostFS)
+    test_fast_copy_upload() {
+        local local_file="/tmp/cp-upload-src.bin"
+        local remote_path="gfs:/cp-uploaded.bin"
+
+        # Create random local file
+        dd if=/dev/urandom of="$local_file" bs=1M count=10 2>/dev/null
+        local hash_src=$(sha256sum "$local_file" | cut -d' ' -f1)
+
+        # Upload via fast copy
+        if ghostfs cp "$local_file" "$remote_path" \
+            --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" 2>/dev/null; then
+
+            # Verify via FUSE mount
+            sleep 1
+            if [ -f "$MOUNT/cp-uploaded.bin" ]; then
+                local hash_dst=$(sha256sum "$MOUNT/cp-uploaded.bin" | cut -d' ' -f1)
+                if [ "$hash_src" = "$hash_dst" ]; then
+                    log_pass "Fast copy upload"
+                else
+                    log_fail "Fast copy upload - hash mismatch"
+                fi
+            else
+                log_fail "Fast copy upload - file not found after upload"
+            fi
+        else
+            log_fail "Fast copy upload - command failed"
+        fi
+
+        rm -f "$local_file"
+    }
+
+    # Test: Fast copy download (GhostFS -> local)
+    test_fast_copy_download() {
+        local remote_path="gfs:/cp-download-src.bin"
+        local local_file="/tmp/cp-downloaded.bin"
+
+        # Create source file via FUSE mount
+        dd if=/dev/urandom of="$MOUNT/cp-download-src.bin" bs=1M count=10 2>/dev/null
+        sync
+        sleep 1
+        local hash_src=$(sha256sum "$MOUNT/cp-download-src.bin" | cut -d' ' -f1)
+
+        # Download via fast copy
+        rm -f "$local_file"
+        if ghostfs cp "$remote_path" "$local_file" \
+            --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" 2>/dev/null; then
+
+            if [ -f "$local_file" ]; then
+                local hash_dst=$(sha256sum "$local_file" | cut -d' ' -f1)
+                if [ "$hash_src" = "$hash_dst" ]; then
+                    log_pass "Fast copy download"
+                else
+                    log_fail "Fast copy download - hash mismatch"
+                fi
+            else
+                log_fail "Fast copy download - file not created"
+            fi
+        else
+            log_fail "Fast copy download - command failed"
+        fi
+
+        rm -f "$local_file"
+    }
+
+    # Test: Server-side copy (GhostFS -> GhostFS)
+    test_fast_copy_server_side() {
+        local src_path="gfs:/cp-ss-src.bin"
+        local dst_path="gfs:/cp-ss-dst.bin"
+
+        # Create source file via FUSE mount
+        dd if=/dev/urandom of="$MOUNT/cp-ss-src.bin" bs=1M count=10 2>/dev/null
+        sync
+        sleep 1
+        local hash_src=$(sha256sum "$MOUNT/cp-ss-src.bin" | cut -d' ' -f1)
+
+        # Server-side copy
+        if ghostfs cp "$src_path" "$dst_path" \
+            --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" 2>/dev/null; then
+
+            sleep 1
+            if [ -f "$MOUNT/cp-ss-dst.bin" ]; then
+                local hash_dst=$(sha256sum "$MOUNT/cp-ss-dst.bin" | cut -d' ' -f1)
+                if [ "$hash_src" = "$hash_dst" ]; then
+                    log_pass "Fast copy server-side"
+                else
+                    log_fail "Fast copy server-side - hash mismatch"
+                fi
+            else
+                log_fail "Fast copy server-side - destination file not found"
+            fi
+        else
+            log_fail "Fast copy server-side - command failed"
+        fi
+    }
+
+    # Run fast copy tests
+    set +e
+    test_fast_copy_upload
+    test_fast_copy_download
+    test_fast_copy_server_side
+    set -e
+}
+
+# Run fast copy tests
+run_fast_copy_tests
+
+# ============================================================================
 # Summary
 # ============================================================================
 
