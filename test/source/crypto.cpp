@@ -44,7 +44,8 @@ TEST_CASE("Size translation - multiple blocks") {
 
   // 1.5 blocks (one full + half)
   int64_t logical_one_half = BLOCK_SIZE + BLOCK_SIZE / 2;
-  int64_t physical_one_half = HEADER_SIZE + ENCRYPTED_BLOCK_SIZE + NONCE_SIZE + BLOCK_SIZE / 2 + TAG_SIZE;
+  int64_t physical_one_half
+      = HEADER_SIZE + ENCRYPTED_BLOCK_SIZE + NONCE_SIZE + BLOCK_SIZE / 2 + TAG_SIZE;
   CHECK(logical_to_physical_size(logical_one_half) == physical_one_half);
   CHECK(physical_to_logical_size(physical_one_half) == logical_one_half);
 }
@@ -86,7 +87,8 @@ TEST_CASE("Encrypt and decrypt block - full block") {
   // Decrypt
   uint8_t decrypted[BLOCK_SIZE];
   size_t decrypted_len;
-  REQUIRE(decrypt_block(ciphertext, NONCE_SIZE + BLOCK_SIZE + TAG_SIZE, key, decrypted, &decrypted_len));
+  REQUIRE(decrypt_block(ciphertext, NONCE_SIZE + BLOCK_SIZE + TAG_SIZE, key, decrypted,
+                        &decrypted_len));
 
   CHECK(decrypted_len == BLOCK_SIZE);
   CHECK(std::memcmp(plaintext, decrypted, BLOCK_SIZE) == 0);
@@ -109,7 +111,8 @@ TEST_CASE("Encrypt and decrypt block - partial block") {
 
   uint8_t decrypted[BLOCK_SIZE];
   size_t decrypted_len;
-  REQUIRE(decrypt_block(ciphertext, NONCE_SIZE + partial_size + TAG_SIZE, key, decrypted, &decrypted_len));
+  REQUIRE(decrypt_block(ciphertext, NONCE_SIZE + partial_size + TAG_SIZE, key, decrypted,
+                        &decrypted_len));
 
   CHECK(decrypted_len == partial_size);
   CHECK(std::memcmp(plaintext, decrypted, partial_size) == 0);
@@ -132,7 +135,8 @@ TEST_CASE("Decrypt with wrong key fails") {
   // Try to decrypt with wrong key
   uint8_t decrypted[BLOCK_SIZE];
   size_t decrypted_len;
-  CHECK(decrypt_block(ciphertext, NONCE_SIZE + len + TAG_SIZE, key2, decrypted, &decrypted_len) == false);
+  CHECK(decrypt_block(ciphertext, NONCE_SIZE + len + TAG_SIZE, key2, decrypted, &decrypted_len)
+        == false);
 }
 
 TEST_CASE("Decrypt with tampered ciphertext fails") {
@@ -152,7 +156,8 @@ TEST_CASE("Decrypt with tampered ciphertext fails") {
 
   uint8_t decrypted[BLOCK_SIZE];
   size_t decrypted_len;
-  CHECK(decrypt_block(ciphertext, NONCE_SIZE + len + TAG_SIZE, key, decrypted, &decrypted_len) == false);
+  CHECK(decrypt_block(ciphertext, NONCE_SIZE + len + TAG_SIZE, key, decrypted, &decrypted_len)
+        == false);
 }
 
 TEST_CASE("Header creation and parsing") {
