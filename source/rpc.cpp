@@ -17,6 +17,7 @@
 #include <iostream>
 #include <iterator>
 #include <sstream>
+#include <thread>
 
 // Cap'n'Proto
 #include <access.capnp.h>
@@ -1936,4 +1937,84 @@ int start_rpc_server(std::string bind, int port, int auth_port, std::string root
   }
 
   return 0;
+}
+
+// Start only the auth RPC server in a detached thread
+void start_auth_server_async(uint16_t auth_port) {
+  std::thread([auth_port]() {
+    kj::_::Debug::setLogLevel(kj::_::Debug::Severity::ERROR);
+
+    auto ioContext = kj::setupAsyncIo();
+    capnp::TwoPartyServer auth_server(kj::heap<GhostFSAuthServerImpl>());
+
+    auto auth_address = ioContext.provider->getNetwork()
+        .parseAddress("127.0.0.1", auth_port)
+        .wait(ioContext.waitScope);
+
+    auto auth_listener = auth_address->listen();
+    std::cout << "Auth server started on port " << auth_port << std::endl;
+
+    auth_server.listen(*auth_listener).wait(ioContext.waitScope);
+  }).detach();
+}
+
+// Start the full RPC server (main + auth) in a detached thread
+void start_rpc_server_async(std::string bind, uint16_t port, uint16_t auth_port,
+                            std::string root, std::string suffix,
+                            std::string key_file, std::string cert_file) {
+  std::thread([bind, port, auth_port, root, suffix, key_file, cert_file]() {
+    if (root.length() > 0) {
+      if (!std::filesystem::is_directory(root)) {
+        std::cerr << "ERROR: directory " << '"' << root << '"' << " does not exist." << std::endl;
+        return;
+      }
+    }
+
+    kj::_::Debug::setLogLevel(kj::_::Debug::Severity::ERROR);
+
+    std::string key = key_file.length() ? read_file(key_file) : "";
+    std::string cert = cert_file.length() ? read_file(cert_file) : "";
+
+    std::cout << "Starting GhostFS RPC server on " << bind << ":" << port << "..." << std::endl;
+    std::cout << "Starting GhostFS auth server on port " << auth_port << "..." << std::endl;
+
+    auto ioContext = kj::setupAsyncIo();
+
+    capnp::TwoPartyServer server(kj::heap<GhostFSAuthImpl>(root, suffix));
+    capnp::TwoPartyServer auth_server(kj::heap<GhostFSAuthServerImpl>());
+
+    auto auth_address = ioContext.provider->getNetwork()
+        .parseAddress("127.0.0.1", auth_port).wait(ioContext.waitScope);
+
+    auto auth_listener = auth_address->listen();
+    auto auth_listen_promise = auth_server.listen(*auth_listener);
+
+    if (key_file.length() || cert_file.length()) {
+      kj::TlsKeypair keypair { kj::TlsPrivateKey(key), kj::TlsCertificate(cert) };
+
+      kj::TlsContext::Options options;
+      options.defaultKeypair = keypair;
+      options.useSystemTrustStore = false;
+      options.acceptErrorHandler = [](kj::Exception &&e) {
+        std::cerr << "TLS Error: " << e.getDescription().cStr() << std::endl;
+      };
+
+      kj::TlsContext tlsContext(kj::mv(options));
+
+      auto network = tlsContext.wrapNetwork(ioContext.provider->getNetwork());
+      auto address = network->parseAddress(bind, port).wait(ioContext.waitScope);
+      auto listener = address->listen();
+      auto listen_promise = server.listen(*listener);
+
+      listen_promise.wait(ioContext.waitScope);
+    } else {
+      auto address = ioContext.provider->getNetwork()
+          .parseAddress(bind, port).wait(ioContext.waitScope);
+
+      auto listener = address->listen();
+      auto listen_promise = server.listen(*listener);
+
+      listen_promise.wait(ioContext.waitScope);
+    }
+  }).detach();
 }

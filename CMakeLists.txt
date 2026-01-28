@@ -60,6 +60,13 @@ CPMAddPackage(
   OPTIONS "FMT_INSTALL YES" # create an installable target
 )
 
+CPMAddPackage(
+  NAME httplib
+  VERSION 0.18.3
+  GITHUB_REPOSITORY yhirose/cpp-httplib
+  OPTIONS "HTTPLIB_REQUIRE_OPENSSL ON"
+)
+
 
 # ---- CSI Support (optional, requires gRPC) ----
 if(GHOSTFS_CSI_SUPPORT)
@@ -162,6 +169,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::capnp-rpc)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::kj-tls)
 target_link_libraries(${PROJECT_NAME} PUBLIC ${FUSE_LIBRARIES})
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::Crypto)
+target_link_libraries(${PROJECT_NAME} PRIVATE httplib::httplib)
 
 # uuid_v4 include only on x86
 if(USE_UUID_V4)
