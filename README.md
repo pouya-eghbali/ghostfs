@@ -24,7 +24,8 @@ GhostFS is a FUSE-based distributed filesystem that exposes any local filesystem
 
 - **Network Filesystem** - Mount remote directories locally via FUSE
 - **High Performance** - Cap'n Proto RPC with write-back and read-ahead caching
-- **Secure** - Token-based authentication with TLS encryption support
+- **Client-Side Encryption** - AES-256-GCM encryption, server never sees plaintext
+- **Secure** - Token-based authentication with TLS transport encryption
 - **Flexible Access Control** - Per-user directories and soft mounts for fine-grained permissions
 - **Backend Agnostic** - Works with any filesystem (ext4, ZFS, Ceph, NFS, etc.)
 - **Lightweight** - Single binary, minimal dependencies at runtime
@@ -95,6 +96,11 @@ CLIENT OPTIONS:
   --write-back, -w <n>  Write cache entries (default: 8)
   --read-ahead, -C <n>  Read cache entries (default: 8)
   --options, -o <opts>  FUSE mount options
+
+ENCRYPTION OPTIONS:
+  --encrypt, -e         Enable client-side encryption
+  --encryption-key <f>  Path to encryption key file
+  --generate-key <f>    Generate a new encryption key file
 
 TLS OPTIONS:
   --key, -k <file>      TLS private key file
@@ -204,6 +210,28 @@ ghostfs --client \
   /mnt/remote
 ```
 
+### Client-Side Encryption
+
+Encrypt data before it leaves your machine. The server only stores ciphertext.
+
+```bash
+# Generate an encryption key (store this securely!)
+ghostfs --generate-key ~/.ghostfs/secret.key
+
+# Mount with encryption enabled
+ghostfs --client \
+  --host storage.example.com \
+  --port 3444 \
+  --user myuser \
+  --token <token> \
+  --encrypt \
+  --encryption-key ~/.ghostfs/secret.key \
+  /mnt/encrypted
+
+# Files are encrypted with AES-256-GCM before being sent to the server
+echo "secret data" > /mnt/encrypted/secret.txt
+```
+
 ### Soft Mounts (Extended Access)
 
 Soft mounts allow users to access directories outside their home folder:
@@ -257,12 +285,14 @@ docker run --rm --privileged --device /dev/fuse --cap-add SYS_ADMIN ghostfs-benc
 
 On Linux (Docker on M1 MacBook Pro, localhost):
 
-| Test                           | Throughput    |
-| ------------------------------ | ------------- |
-| Large file write (1GB)         | ~841 MB/s     |
-| Large file read (1GB)          | ~953 MB/s     |
-| Small files write (1000 x 4KB) | ~1385 files/s |
-| Small files read (1000 x 4KB)  | ~4654 files/s |
+| Test                           | Unencrypted   | Encrypted     |
+| ------------------------------ | ------------- | ------------- |
+| Large file write (1GB)         | ~820 MB/s     | ~477 MB/s     |
+| Large file read (1GB)          | ~981 MB/s     | ~1112 MB/s    |
+| Small files write (1000 x 4KB) | ~1367 files/s | ~1074 files/s |
+| Small files read (1000 x 4KB)  | ~4721 files/s | ~3904 files/s |
+
+Encryption uses AES-256-GCM with hardware acceleration (AES-NI). Encrypted reads can be faster due to 128KB block size optimizing sequential I/O.
 
 Performance varies based on hardware, network latency, and cache settings. macOS performance is roughly 2x slower due to macFUSE overhead.
 

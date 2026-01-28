@@ -15,6 +15,7 @@ PORT="${GHOSTFS_PORT:-3444}"
 AUTH_PORT="${GHOSTFS_AUTH_PORT:-3445}"
 USER="testuser"
 TOKEN=""
+ENCRYPTION_KEY="/tmp/ghostfs-e2e-encryption.key"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -435,6 +436,189 @@ test_concurrent_writes
 test_overwrite_file
 test_large_file_integrity
 set -e
+
+# ============================================================================
+# Encryption Tests
+# ============================================================================
+
+run_encryption_tests() {
+    echo ""
+    log_info "============================================"
+    log_info "Running encryption tests..."
+    log_info "============================================"
+    echo ""
+
+    # Unmount current client
+    log_info "Unmounting unencrypted client..."
+    fusermount -u "$MOUNT" 2>/dev/null || umount "$MOUNT" 2>/dev/null || true
+    sleep 1
+
+    # Clean up user directory for fresh encryption tests
+    rm -rf "$ROOT/$USER"/*
+
+    # Generate encryption key
+    log_info "Generating encryption key..."
+    ghostfs --generate-key "$ENCRYPTION_KEY"
+
+    # Mount with encryption
+    log_info "Mounting with encryption enabled..."
+    ghostfs --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
+        --encrypt --encryption-key "$ENCRYPTION_KEY" \
+        --write-back 32 --read-ahead 32 "$MOUNT" &
+    sleep 2
+
+    if ! mountpoint -q "$MOUNT"; then
+        log_fail "Encrypted mount - failed to mount"
+        return 1
+    fi
+    log_info "Encrypted filesystem mounted at $MOUNT"
+
+    # Test: Create and read encrypted file
+    test_encrypted_create_read() {
+        local testfile="$MOUNT/encrypted_test.txt"
+        local content="This is secret encrypted content!"
+
+        echo "$content" > "$testfile"
+        local read_content=$(cat "$testfile")
+
+        if [ "$read_content" = "$content" ]; then
+            log_pass "Encrypted: Create and read file"
+        else
+            log_fail "Encrypted: Create and read - content mismatch"
+        fi
+    }
+
+    # Test: Verify server sees ciphertext, not plaintext
+    test_server_sees_ciphertext() {
+        local testfile="$MOUNT/plaintext_check.txt"
+        local server_file="$ROOT/$USER/plaintext_check.txt"
+        local secret="SUPER_SECRET_PLAINTEXT_12345"
+
+        echo "$secret" > "$testfile"
+        sync
+        sleep 1
+
+        # Check if server file exists and contains the secret in plaintext
+        if [ -f "$server_file" ]; then
+            if grep -q "$secret" "$server_file" 2>/dev/null; then
+                log_fail "Encrypted: Server sees plaintext - SECURITY ISSUE!"
+            else
+                # Verify file has encrypted header (starts with version 0x00 0x01)
+                # Read first two bytes and check they are 0x00 0x01
+                local byte1=$(od -An -tx1 -N1 "$server_file" 2>/dev/null | tr -d ' ')
+                local byte2=$(od -An -tx1 -N1 -j1 "$server_file" 2>/dev/null | tr -d ' ')
+                if [ "$byte1" = "00" ] && [ "$byte2" = "01" ]; then
+                    log_pass "Encrypted: Server sees only ciphertext"
+                else
+                    # Also check file size - encrypted file should be larger than plaintext
+                    local server_size=$(stat -c "%s" "$server_file" 2>/dev/null || stat -f "%z" "$server_file" 2>/dev/null)
+                    local plaintext_size=${#secret}
+                    # Encrypted size should be: 18 (header) + 24 (nonce) + plaintext + 1 (newline) + 16 (tag)
+                    if [ "$server_size" -gt "$((plaintext_size + 50))" ]; then
+                        log_pass "Encrypted: Server sees only ciphertext (size check)"
+                    else
+                        log_fail "Encrypted: Server file doesn't appear encrypted (header=$byte1$byte2, size=$server_size)"
+                    fi
+                fi
+            fi
+        else
+            log_fail "Encrypted: Server file not found"
+        fi
+    }
+
+    # Test: Large encrypted file integrity
+    test_encrypted_large_file() {
+        local size_mb=8
+        local local_original="/tmp/encrypted_integrity_original.bin"
+        local ghostfs_file="$MOUNT/encrypted_integrity.bin"
+        local local_copy="/tmp/encrypted_integrity_copy.bin"
+
+        # Create random file locally
+        dd if=/dev/urandom of="$local_original" bs=1M count=$size_mb 2>/dev/null
+
+        # Calculate hash of original
+        local hash_original=$(sha256sum "$local_original" | cut -d' ' -f1)
+
+        # Copy to encrypted GhostFS
+        cp "$local_original" "$ghostfs_file"
+        sync
+
+        # Calculate hash of file on GhostFS
+        local hash_ghostfs=$(sha256sum "$ghostfs_file" | cut -d' ' -f1)
+
+        # Copy back from GhostFS
+        cp "$ghostfs_file" "$local_copy"
+
+        # Calculate hash of copied file
+        local hash_copy=$(sha256sum "$local_copy" | cut -d' ' -f1)
+
+        # Verify all hashes match
+        if [ "$hash_original" = "$hash_ghostfs" ] && [ "$hash_ghostfs" = "$hash_copy" ]; then
+            log_pass "Encrypted: Large file integrity (${size_mb}MB)"
+        else
+            log_fail "Encrypted: Large file integrity - hash mismatch"
+            log_fail "  Original: $hash_original"
+            log_fail "  GhostFS:  $hash_ghostfs"
+            log_fail "  Copy:     $hash_copy"
+        fi
+
+        rm -f "$local_original" "$local_copy"
+    }
+
+    # Test: Overwrite encrypted file (tests block reencryption)
+    test_encrypted_overwrite() {
+        local testfile="$MOUNT/encrypted_overwrite.txt"
+
+        echo "first content" > "$testfile"
+        echo "second content" > "$testfile"
+
+        local content=$(cat "$testfile")
+
+        if [ "$content" = "second content" ]; then
+            log_pass "Encrypted: Overwrite file"
+        else
+            log_fail "Encrypted: Overwrite - content not updated"
+        fi
+    }
+
+    # Test: Partial block write (tests read-modify-write)
+    test_encrypted_partial_write() {
+        local testfile="$MOUNT/encrypted_partial.txt"
+
+        # Write initial content
+        echo "AAAAAAAAAA" > "$testfile"
+        sync  # Ensure first write is committed before append
+        sleep 1
+
+        # Append (partial block write)
+        echo "BBBBBBBBBB" >> "$testfile"
+        sync
+
+        local lines=$(wc -l < "$testfile" 2>/dev/null)
+        local content=$(cat "$testfile" 2>/dev/null)
+
+        if [ "$lines" -eq 2 ] && echo "$content" | grep -q "AAAAAAAAAA" && echo "$content" | grep -q "BBBBBBBBBB"; then
+            log_pass "Encrypted: Partial block write (append)"
+        else
+            log_fail "Encrypted: Partial block write failed (lines=$lines)"
+        fi
+    }
+
+    # Run encryption tests
+    set +e
+    test_encrypted_create_read
+    test_server_sees_ciphertext
+    test_encrypted_large_file
+    test_encrypted_overwrite
+    test_encrypted_partial_write
+    set -e
+
+    # Cleanup encryption key
+    rm -f "$ENCRYPTION_KEY"
+}
+
+# Run encryption tests
+run_encryption_tests
 
 # ============================================================================
 # Summary

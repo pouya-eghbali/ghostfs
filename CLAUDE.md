@@ -25,9 +25,10 @@ GhostFS is a FUSE-based distributed filesystem that serves any filesystem over t
 
 | Component | Files | Purpose |
 |-----------|-------|---------|
-| FUSE Client | `source/fs.cpp`, `include/ghostfs/fs.h` | Low-level FUSE operations, caching |
+| FUSE Client | `source/fs.cpp`, `include/ghostfs/fs.h` | Low-level FUSE operations, caching, encryption |
 | RPC Server | `source/rpc.cpp`, `include/ghostfs/rpc.h` | Cap'n Proto server, filesystem backend |
 | Auth System | `source/auth.cpp`, `include/ghostfs/auth.h` | Token-based auth, soft mounts, access control |
+| Crypto | `source/crypto.cpp`, `include/ghostfs/crypto.h` | XChaCha20-Poly1305 encryption via libsodium |
 | Protocol | `capnp/*.capnp` | 41 Cap'n Proto schema files for RPC |
 | CLI | `standalone/source/main.cpp` | Command-line interface for client/server |
 
@@ -37,10 +38,10 @@ GhostFS is a FUSE-based distributed filesystem that serves any filesystem over t
 
 ```bash
 # Ubuntu/Debian
-sudo apt install libfuse-dev zlib1g-dev cmake g++
+sudo apt install libfuse-dev zlib1g-dev libsodium-dev cmake g++
 
 # macOS
-brew install osxfuse cmake
+brew install macfuse libsodium cmake
 ```
 
 ### Building
@@ -88,6 +89,9 @@ The output binary is `build/standalone/GhostFS`.
 - `--write-back/-w`: Write cache size (default: 8)
 - `--read-ahead/-C`: Read cache size (default: 8)
 - `--key/-k`, `--cert/-T`: TLS key and certificate files
+- `--encrypt/-e`: Enable client-side encryption
+- `--encryption-key`: Path to encryption key file
+- `--generate-key`: Generate a new encryption key file
 
 ## Code Organization
 
@@ -122,6 +126,7 @@ ghostfs/
 - fmt 7.1.3 - String formatting
 - uuid_v4 1.0.0 - UUID generation
 - OpenSSL - TLS support
+- libsodium - Client-side encryption (XChaCha20-Poly1305)
 - doctest 2.4.5 - Testing (optional)
 - cxxopts 2.2.1 - CLI parsing (optional)
 
@@ -189,6 +194,28 @@ Adjust `--write-back` and `--read-ahead` values for workload. Higher values use 
 ### Adding TLS
 
 Generate key/cert and pass via `--key` and `--cert` flags on both client and server.
+
+### Client-Side Encryption
+
+GhostFS supports XChaCha20-Poly1305 client-side encryption. Data is encrypted on the client before being sent to the server, which only stores opaque ciphertext.
+
+```bash
+# Generate encryption key
+./GhostFS --generate-key ~/.ghostfs/encryption.key
+
+# Mount with encryption enabled
+./GhostFS --client --encrypt --encryption-key ~/.ghostfs/encryption.key \
+  --host <server-ip> --port 3444 --user <username> --token <token> /mount/point
+```
+
+**File format:**
+- Header (18 bytes): version (2) + file_id (16)
+- Each block (4136 bytes max): nonce (24) + ciphertext (up to 4096) + tag (16)
+
+**Notes:**
+- Encryption is opt-in per mount (`--encrypt` flag required)
+- Each block uses a unique random nonce for security
+- The server cannot read file contents when encryption is enabled
 
 ## File Reference
 
