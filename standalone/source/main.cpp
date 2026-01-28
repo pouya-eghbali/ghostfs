@@ -165,6 +165,11 @@ auto main(int argc, char** argv) -> int {
     uint16_t auth_port = result["auth-port"].as<uint16_t>();
     uint16_t http_port = result["http-port"].as<uint16_t>();
 
+    // Default to port 443 when ACME is enabled and user didn't specify a port
+    if (use_acme && result.count("http-port") == 0) {
+      http_port = 443;
+    }
+
     // Initialize crypto if needed
     if (!ghostfs::crypto::init()) {
       std::cerr << "Warning: Failed to initialize encryption support" << std::endl;
@@ -240,6 +245,11 @@ auto main(int argc, char** argv) -> int {
     uint16_t port = result["port"].as<uint16_t>();
     uint16_t auth_port = result["auth-port"].as<uint16_t>();
     uint16_t http_port = result["http-port"].as<uint16_t>();
+
+    // Default to port 443 when ACME is enabled and user didn't specify a port
+    if (use_acme && result.count("http-port") == 0) {
+      http_port = 443;
+    }
 
     // Initialize crypto if needed
     if (!ghostfs::crypto::init()) {
