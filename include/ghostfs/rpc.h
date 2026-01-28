@@ -16,6 +16,5 @@ int rpc_unmount_all(uint16_t port, std::string user);
 void start_auth_server_async(uint16_t auth_port);
 
 // Start the full RPC server (main + auth) in a background thread
-void start_rpc_server_async(std::string bind, uint16_t port, uint16_t auth_port,
-                            std::string root, std::string suffix,
-                            std::string key_file, std::string cert_file);
+void start_rpc_server_async(std::string bind, uint16_t port, uint16_t auth_port, std::string root,
+                            std::string suffix, std::string key_file, std::string cert_file);
