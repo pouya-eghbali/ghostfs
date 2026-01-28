@@ -12,8 +12,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace ghostfs::acme {
 
@@ -586,13 +588,50 @@ namespace ghostfs::acme {
         challenge_callback_(token);
       }
 
+      // Start temporary HTTP server to serve the challenge response
+      auto challenge_server = std::make_unique<httplib::Server>();
+      std::string challenge_key_auth = key_auth;
+      std::string challenge_token = token;
+
+      challenge_server->Get(R"(/\.well-known/acme-challenge/(.+))",
+                            [&challenge_token, &challenge_key_auth](const httplib::Request& req,
+                                                                    httplib::Response& res) {
+                              auto req_token = req.matches[1].str();
+                              if (req_token == challenge_token) {
+                                res.set_content(challenge_key_auth, "text/plain");
+                              } else {
+                                res.status = 404;
+                              }
+                            });
+
+      auto* svr_ptr = challenge_server.get();
+      std::thread server_thread([svr_ptr, this]() {
+        std::cout << "Starting challenge server on port " << config_.challenge_port << std::endl;
+        svr_ptr->listen("0.0.0.0", config_.challenge_port);
+      });
+
+      // Wait briefly for server to start
+      for (int i = 0; i < 50 && !svr_ptr->is_running(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+
+      if (!svr_ptr->is_running()) {
+        std::cerr << "Failed to start challenge server on port " << config_.challenge_port
+                  << std::endl;
+        if (server_thread.joinable()) server_thread.join();
+        return false;
+      }
+
       // Respond to challenge
       auto challenge_res = acme_post(challenge_url, "{}", true);
       if (!challenge_res) {
+        svr_ptr->stop();
+        if (server_thread.joinable()) server_thread.join();
         return false;
       }
 
       // Poll for challenge completion
+      bool success = false;
       for (int i = 0; i < 30; i++) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -605,14 +644,19 @@ namespace ghostfs::acme {
           std::lock_guard<std::mutex> lock(challenge_mutex_);
           pending_token_.clear();
           pending_key_auth_.clear();
-          return true;
+          success = true;
+          break;
         } else if (status == "invalid") {
           std::cerr << "Challenge became invalid" << std::endl;
-          return false;
+          break;
         }
       }
 
-      return false;
+      // Stop temporary challenge server
+      svr_ptr->stop();
+      if (server_thread.joinable()) server_thread.join();
+
+      return success;
     }
 
     std::string get_challenge_response(const std::string& token) const {
