@@ -176,7 +176,8 @@ auto main(int argc, char** argv) -> int {
       acme_config.domain = acme_domain;
       acme_config.email = acme_email;
       acme_config.staging = acme_staging;
-      acme_config.cert_dir = acme_cert_dir.empty() ? ghostfs::acme::get_default_cert_dir() : acme_cert_dir;
+      acme_config.cert_dir
+          = acme_cert_dir.empty() ? ghostfs::acme::get_default_cert_dir() : acme_cert_dir;
       acme_config.challenge_port = acme_challenge_port;
 
       cert_manager = std::make_unique<ghostfs::acme::CertManager>(acme_config);
@@ -251,7 +252,8 @@ auto main(int argc, char** argv) -> int {
       acme_config.domain = acme_domain;
       acme_config.email = acme_email;
       acme_config.staging = acme_staging;
-      acme_config.cert_dir = acme_cert_dir.empty() ? ghostfs::acme::get_default_cert_dir() : acme_cert_dir;
+      acme_config.cert_dir
+          = acme_cert_dir.empty() ? ghostfs::acme::get_default_cert_dir() : acme_cert_dir;
       acme_config.challenge_port = acme_challenge_port;
 
       cert_manager = std::make_unique<ghostfs::acme::CertManager>(acme_config);
