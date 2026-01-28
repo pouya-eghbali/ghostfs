@@ -1018,18 +1018,17 @@ namespace ghostfs::http {
       }
     });
 
-    // Handle API 404s (only when no content has been set)
+    // Handle API 404s (only when status is 404 and no content has been set)
     svr->set_error_handler([](const httplib::Request& req, httplib::Response& res) {
-      if (req.path.find("/api/") == 0 && res.body.empty()) {
+      if (req.path.find("/api/") == 0 && res.body.empty() && res.status == 404) {
         set_cors_headers(res);
-        res.status = 404;
         res.set_content(R"({"success":false,"error":"API endpoint not found"})",
                         "application/json");
       }
     });
 
-    // Set payload limits
-    svr->set_payload_max_length(1024 * 1024 * 100);  // 100MB max upload
+    // Set payload limits (10GB for large file uploads)
+    svr->set_payload_max_length(static_cast<size_t>(1024) * 1024 * 1024 * 10);
 
     // Start server
     if (!svr->listen(bind.c_str(), http_port)) {
