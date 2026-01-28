@@ -1,4 +1,5 @@
 #include <ghostfs/benchmark.h>
+#include <ghostfs/copy.h>
 #include <ghostfs/crypto.h>
 #include <ghostfs/fs.h>
 #include <ghostfs/ghostfs.h>
@@ -57,15 +58,36 @@ auto main(int argc, char** argv) -> int {
     ("e,encrypt", "Enable client-side encryption")
     ("encryption-key", "Path to encryption key file", cxxopts::value<std::string>()->default_value(""))
     ("generate-key", "Generate a new encryption key file", cxxopts::value<std::string>())
+    ("progress", "Show progress bar for copy operations")
 #ifdef GHOSTFS_CSI_SUPPORT
     ("csi", "Run as CSI driver")
     ("csi-socket", "CSI socket path", cxxopts::value<std::string>()->default_value("/csi/csi.sock"))
 #endif
-    ("mountpoint", "Mount point for client mode", cxxopts::value<std::string>()->default_value(""));
+    ("mountpoint", "Mount point for client mode or copy destination", cxxopts::value<std::string>()->default_value(""))
+    ("cp-source", "Copy source path (for cp command)", cxxopts::value<std::string>()->default_value(""));
 
   // clang-format on
 
-  options.parse_positional({"mountpoint"});
+  // Check for cp command: GhostFS cp <source> <destination> [options]
+  bool is_copy_mode = (argc >= 2 && std::string(argv[1]) == "cp");
+
+  // Keep modified_argv alive for the duration of the program
+  std::vector<char*> modified_argv;
+
+  if (is_copy_mode) {
+    // For cp mode, skip the "cp" argument in parsing
+    // Create a modified argv that removes "cp" from position 1
+    modified_argv.push_back(argv[0]);
+    for (int i = 2; i < argc; ++i) {
+      modified_argv.push_back(argv[i]);
+    }
+    options.parse_positional({"cp-source", "mountpoint"});
+    argc = static_cast<int>(modified_argv.size());
+    argv = modified_argv.data();
+  } else {
+    options.parse_positional({"mountpoint"});
+  }
+
   auto result = options.parse(argc, argv);
 
   // std::cout << "UUID: " << gen_uuid() << std::endl;
@@ -217,6 +239,32 @@ auto main(int argc, char** argv) -> int {
     config.verify = !result["no-verify"].as<bool>();
 
     return ghostfs::run_benchmark(config);
+
+  } else if (is_copy_mode) {
+    // Copy mode: GhostFS cp <source> <destination> [options]
+    std::string source = result["cp-source"].as<std::string>();
+    std::string destination = result["mountpoint"].as<std::string>();
+
+    if (source.empty() || destination.empty()) {
+      std::cerr << "Usage: GhostFS cp <source> <destination> [options]" << std::endl;
+      std::cerr << "  Use gfs: prefix for GhostFS paths (e.g., gfs:/path/to/file)" << std::endl;
+      std::cerr << "  Required for GhostFS paths: --host, --port, --user, --token" << std::endl;
+      return 1;
+    }
+
+    ghostfs::CopyConfig copy_config;
+    copy_config.source = source;
+    copy_config.destination = destination;
+    copy_config.host = result["host"].as<std::string>();
+    copy_config.port = result["port"].as<uint16_t>();
+    copy_config.user = result.count("user") ? result["user"].as<std::string>() : "";
+    copy_config.token = result["token"].as<std::string>();
+    copy_config.cert = result["cert"].as<std::string>();
+    copy_config.encrypt = result["encrypt"].as<bool>();
+    copy_config.encryption_key = result["encryption-key"].as<std::string>();
+    copy_config.show_progress = result["progress"].as<bool>();
+
+    return ghostfs::run_copy(copy_config);
   }
 
   // No mode specified - show help

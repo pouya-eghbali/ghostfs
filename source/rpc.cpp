@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <fmt/format.h>
 #include <fuse_lowlevel.h>
 #include <ghostfs/auth.h>
@@ -7,6 +8,10 @@
 #include <limits.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+
+#ifdef __APPLE__
+#  include <copyfile.h>
+#endif
 
 #include <fstream>
 #include <iostream>
@@ -26,6 +31,12 @@
 #include <kj/debug.h>
 
 // Cap'n'Proto methods
+#include <bulkread.capnp.h>
+#include <bulkread.response.capnp.h>
+#include <bulkupload.capnp.h>
+#include <bulkupload.response.capnp.h>
+#include <copyfile.capnp.h>
+#include <copyfile.response.capnp.h>
 #include <create.capnp.h>
 #include <create.response.capnp.h>
 #include <flush.capnp.h>
@@ -1399,6 +1410,235 @@ public:
 
     response.setErrno(err);
     response.setRes(res);
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> copyFile(CopyFileContext context) override {
+    auto params = context.getParams();
+    auto req = params.getReq();
+
+    auto results = context.getResults();
+    auto response = results.getRes();
+
+    std::string src_path_str = req.getSrcPath();
+    std::string dst_path_str = req.getDstPath();
+
+    // Resolve paths relative to user root
+    std::string user_root = normalize_path(root, user, suffix);
+    std::filesystem::path src_path = std::filesystem::path(user_root) / src_path_str;
+    std::filesystem::path dst_path = std::filesystem::path(user_root) / dst_path_str;
+
+    // Check access for both paths
+    bool access_ok = check_access(root, user, suffix, src_path);
+    if (not access_ok) {
+      response.setErrno(EACCES);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    access_ok = check_access(root, user, suffix, dst_path);
+    if (not access_ok) {
+      response.setErrno(EACCES);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Open source file
+    int src_fd = ::open(src_path.c_str(), O_RDONLY);
+    if (src_fd == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Get source file size
+    struct stat src_stat;
+    if (::fstat(src_fd, &src_stat) == -1) {
+      int err = errno;
+      ::close(src_fd);
+      response.setErrno(err);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Create/open destination file with same permissions
+    int dst_fd = ::open(dst_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, src_stat.st_mode);
+    if (dst_fd == -1) {
+      int err = errno;
+      ::close(src_fd);
+      response.setErrno(err);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    int64_t total_copied = 0;
+    int res = 0;
+
+#ifdef __APPLE__
+    // macOS: use fcopyfile for efficient copy
+    if (fcopyfile(src_fd, dst_fd, nullptr, COPYFILE_DATA) == 0) {
+      total_copied = src_stat.st_size;
+    } else {
+      res = -1;
+    }
+#else
+    // Linux: use copy_file_range for efficient copy
+    off_t src_off = 0;
+    off_t dst_off = 0;
+    size_t remaining = src_stat.st_size;
+
+    while (remaining > 0) {
+      ssize_t copied = copy_file_range(src_fd, &src_off, dst_fd, &dst_off, remaining, 0);
+      if (copied == -1) {
+        res = -1;
+        break;
+      }
+      if (copied == 0) {
+        break;
+      }
+      total_copied += copied;
+      remaining -= copied;
+    }
+#endif
+
+    int err = errno;
+    ::close(src_fd);
+    ::close(dst_fd);
+
+    response.setRes(res);
+    response.setErrno(res == -1 ? err : 0);
+    response.setBytesCopied(total_copied);
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> bulkRead(BulkReadContext context) override {
+    auto params = context.getParams();
+    auto req = params.getReq();
+
+    auto results = context.getResults();
+    auto response = results.getRes();
+
+    std::string path_str = req.getPath();
+    int64_t offset = req.getOffset();
+    uint64_t size = req.getSize();
+
+    // Resolve path relative to user root
+    std::string user_root = normalize_path(root, user, suffix);
+    std::filesystem::path file_path = std::filesystem::path(user_root) / path_str;
+
+    // Check access
+    bool access_ok = check_access(root, user, suffix, file_path);
+    if (not access_ok) {
+      response.setErrno(EACCES);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Open file
+    int fd = ::open(file_path.c_str(), O_RDONLY);
+    if (fd == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Allocate buffer
+    std::vector<char> buf(size);
+
+    // Read data
+    ssize_t bytes_read = ::pread(fd, buf.data(), size, offset);
+    int err = errno;
+
+    ::close(fd);
+
+    if (bytes_read == -1) {
+      response.setErrno(err);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Set response
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)buf.data(), bytes_read);
+    capnp::Data::Reader buf_reader(buf_ptr);
+
+    response.setBuf(buf_reader);
+    response.setErrno(0);
+    response.setRes(bytes_read);
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> bulkUpload(BulkUploadContext context) override {
+    auto params = context.getParams();
+    auto req = params.getReq();
+
+    auto results = context.getResults();
+    auto response = results.getRes();
+
+    std::string path_str = req.getPath();
+    int64_t offset = req.getOffset();
+    bool truncate_flag = req.getTruncate();
+    uint32_t mode = req.getMode();
+
+    capnp::Data::Reader buf_reader = req.getBuf();
+    const auto chars = buf_reader.asChars();
+    const char* buf = chars.begin();
+    size_t buf_size = chars.size();
+
+    // Resolve path relative to user root
+    std::string user_root = normalize_path(root, user, suffix);
+    std::filesystem::path file_path = std::filesystem::path(user_root) / path_str;
+
+    // Check access
+    bool access_ok = check_access(root, user, suffix, file_path);
+    if (not access_ok) {
+      response.setErrno(EACCES);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Ensure parent directory exists
+    std::filesystem::path parent_path = file_path.parent_path();
+    if (!std::filesystem::exists(parent_path)) {
+      std::error_code ec;
+      std::filesystem::create_directories(parent_path, ec);
+      if (ec) {
+        response.setErrno(ec.value());
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
+    }
+
+    // Open file with appropriate flags
+    int flags = O_WRONLY | O_CREAT;
+    if (truncate_flag) {
+      flags |= O_TRUNC;
+    }
+
+    int fd = ::open(file_path.c_str(), flags, mode ? mode : 0644);
+    if (fd == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Write data
+    ssize_t written = ::pwrite(fd, buf, buf_size, offset);
+    int err = errno;
+
+    ::close(fd);
+
+    if (written == -1) {
+      response.setErrno(err);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    response.setRes(0);
+    response.setErrno(0);
+    response.setWritten(written);
 
     return kj::READY_NOW;
   }
