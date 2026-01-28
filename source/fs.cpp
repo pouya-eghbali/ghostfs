@@ -266,10 +266,33 @@ uint64_t get_parent_ino(uint64_t ino, std::string path) {
   return parent_ino;
 }
 
+// Translate open flags from macOS to Linux values for cross-platform RPC
+static int64_t translate_flags_to_linux(int64_t flags) {
+#ifdef __APPLE__
+  // Access mode bits (O_RDONLY=0, O_WRONLY=1, O_RDWR=2) are the same on both platforms
+  int64_t result = flags & O_ACCMODE;
+
+  // macOS flag value → Linux flag value
+  if (flags & 0x0004) result |= 0x0800;      // O_NONBLOCK
+  if (flags & 0x0008) result |= 0x0400;      // O_APPEND
+  if (flags & 0x0080) result |= 0x101000;    // O_SYNC
+  if (flags & 0x0100) result |= 0x20000;     // O_NOFOLLOW
+  if (flags & 0x0200) result |= 0x0040;      // O_CREAT
+  if (flags & 0x0400) result |= 0x0200;      // O_TRUNC
+  if (flags & 0x0800) result |= 0x0080;      // O_EXCL
+  if (flags & 0x100000) result |= 0x10000;   // O_DIRECTORY
+  if (flags & 0x1000000) result |= 0x80000;  // O_CLOEXEC
+
+  return result;
+#else
+  return flags;
+#endif
+}
+
 template <class T> void fillFileInfo(T *fuseFileInfo, struct fuse_file_info *fi) {
   if (!fi) return;
 
-  fuseFileInfo->setFlags(fi->flags);
+  fuseFileInfo->setFlags(translate_flags_to_linux(fi->flags));
   fuseFileInfo->setWritepage(fi->writepage);
   fuseFileInfo->setDirectIo(fi->direct_io);
   fuseFileInfo->setKeepCache(fi->keep_cache);
