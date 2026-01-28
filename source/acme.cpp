@@ -574,6 +574,10 @@ namespace ghostfs::acme {
 
       // Build key authorization
       std::string thumbprint = get_thumbprint();
+      if (thumbprint.empty()) {
+        std::cerr << "Failed to compute JWK thumbprint" << std::endl;
+        return false;
+      }
       std::string key_auth = token + "." + thumbprint;
 
       // Store challenge for HTTP server
@@ -593,13 +597,20 @@ namespace ghostfs::acme {
       std::string challenge_key_auth = key_auth;
       std::string challenge_token = token;
 
+      std::cout << "Challenge token: " << token << std::endl;
+      std::cout << "Key authorization length: " << key_auth.size() << std::endl;
+
       challenge_server->Get(R"(/\.well-known/acme-challenge/(.+))",
                             [&challenge_token, &challenge_key_auth](const httplib::Request& req,
                                                                     httplib::Response& res) {
                               auto req_token = req.matches[1].str();
+                              std::cout << "Challenge request for token: " << req_token
+                                        << std::endl;
                               if (req_token == challenge_token) {
+                                std::cout << "Serving key authorization" << std::endl;
                                 res.set_content(challenge_key_auth, "text/plain");
                               } else {
+                                std::cout << "Token mismatch, returning 404" << std::endl;
                                 res.status = 404;
                               }
                             });
@@ -622,13 +633,16 @@ namespace ghostfs::acme {
         return false;
       }
 
-      // Respond to challenge
+      // Respond to challenge (tell ACME server we're ready)
+      std::cout << "Notifying ACME server to validate challenge..." << std::endl;
       auto challenge_res = acme_post(challenge_url, "{}", true);
       if (!challenge_res) {
+        std::cerr << "Failed to POST challenge response" << std::endl;
         svr_ptr->stop();
         if (server_thread.joinable()) server_thread.join();
         return false;
       }
+      std::cout << "Challenge response status: " << challenge_res->status << std::endl;
 
       // Poll for challenge completion
       bool success = false;
@@ -648,6 +662,7 @@ namespace ghostfs::acme {
           break;
         } else if (status == "invalid") {
           std::cerr << "Challenge became invalid" << std::endl;
+          std::cerr << "Response: " << status_res->body << std::endl;
           break;
         }
       }
