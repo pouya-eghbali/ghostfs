@@ -55,44 +55,6 @@ namespace ghostfs::acme {
     return base64url_encode(reinterpret_cast<const uint8_t*>(str.data()), str.size());
   }
 
-  // Base64 URL decoding
-  static std::vector<uint8_t> base64url_decode(const std::string& input) {
-    static const int8_t decode_table[256]
-        = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, 62, -1, -1, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0,
-           1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-           23, 24, 25, -1, -1, -1, -1, 63, -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
-           39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
-
-    std::vector<uint8_t> result;
-    result.reserve((input.size() * 3) / 4);
-
-    uint32_t buffer = 0;
-    int bits = 0;
-
-    for (char c : input) {
-      int8_t val = decode_table[static_cast<uint8_t>(c)];
-      if (val < 0) continue;
-
-      buffer = (buffer << 6) | val;
-      bits += 6;
-
-      if (bits >= 8) {
-        bits -= 8;
-        result.push_back(static_cast<uint8_t>((buffer >> bits) & 0xFF));
-      }
-    }
-
-    return result;
-  }
-
   // Simple JSON string extraction (we don't have a JSON library)
   static std::string json_get_string(const std::string& json, const std::string& key) {
     std::string search = "\"" + key + "\"";
@@ -157,6 +119,28 @@ namespace ghostfs::acme {
     EVP_DigestFinal_ex(ctx, hash.data(), &len);
     EVP_MD_CTX_free(ctx);
     return hash;
+  }
+
+  // Extract EC P-256 public key coordinates from EVP_PKEY (OpenSSL 3.0+ API)
+  static bool get_ec_pub_coords(EVP_PKEY* key, std::vector<uint8_t>& x_bytes,
+                                std::vector<uint8_t>& y_bytes) {
+    BIGNUM* x = nullptr;
+    BIGNUM* y = nullptr;
+
+    if (!EVP_PKEY_get_bn_param(key, "qx", &x) || !EVP_PKEY_get_bn_param(key, "qy", &y)) {
+      BN_free(x);
+      BN_free(y);
+      return false;
+    }
+
+    x_bytes.resize(32);
+    y_bytes.resize(32);
+    BN_bn2binpad(x, x_bytes.data(), 32);
+    BN_bn2binpad(y, y_bytes.data(), 32);
+
+    BN_free(x);
+    BN_free(y);
+    return true;
   }
 
   // ACME client implementation
@@ -295,25 +279,8 @@ namespace ghostfs::acme {
 
     // Get JWK thumbprint for key authorization
     std::string get_thumbprint() {
-      // Get EC public key coordinates
-      EC_KEY* ec_key = EVP_PKEY_get1_EC_KEY(account_key_);
-      if (!ec_key) return "";
-
-      const EC_POINT* pub = EC_KEY_get0_public_key(ec_key);
-      const EC_GROUP* group = EC_KEY_get0_group(ec_key);
-
-      BIGNUM* x = BN_new();
-      BIGNUM* y = BN_new();
-      EC_POINT_get_affine_coordinates(group, pub, x, y, nullptr);
-
-      // Convert to fixed-size byte arrays (32 bytes for P-256)
-      std::vector<uint8_t> x_bytes(32), y_bytes(32);
-      BN_bn2binpad(x, x_bytes.data(), 32);
-      BN_bn2binpad(y, y_bytes.data(), 32);
-
-      BN_free(x);
-      BN_free(y);
-      EC_KEY_free(ec_key);
+      std::vector<uint8_t> x_bytes, y_bytes;
+      if (!get_ec_pub_coords(account_key_, x_bytes, y_bytes)) return "";
 
       // Create JWK (sorted keys for canonical form)
       std::string jwk = fmt::format(R"({{"crv":"P-256","kty":"EC","x":"{}","y":"{}"}})",
@@ -364,22 +331,8 @@ namespace ghostfs::acme {
 
     // Build protected header with JWK (for new account)
     std::string build_protected_with_jwk(const std::string& nonce, const std::string& url) {
-      // Get EC public key
-      EC_KEY* ec_key = EVP_PKEY_get1_EC_KEY(account_key_);
-      const EC_POINT* pub = EC_KEY_get0_public_key(ec_key);
-      const EC_GROUP* group = EC_KEY_get0_group(ec_key);
-
-      BIGNUM* x = BN_new();
-      BIGNUM* y = BN_new();
-      EC_POINT_get_affine_coordinates(group, pub, x, y, nullptr);
-
-      std::vector<uint8_t> x_bytes(32), y_bytes(32);
-      BN_bn2binpad(x, x_bytes.data(), 32);
-      BN_bn2binpad(y, y_bytes.data(), 32);
-
-      BN_free(x);
-      BN_free(y);
-      EC_KEY_free(ec_key);
+      std::vector<uint8_t> x_bytes, y_bytes;
+      if (!get_ec_pub_coords(account_key_, x_bytes, y_bytes)) return "";
 
       std::string header = fmt::format(
           R"({{"alg":"ES256","jwk":{{"crv":"P-256","kty":"EC","x":"{}","y":"{}"}},"nonce":"{}","url":"{}"}})",
