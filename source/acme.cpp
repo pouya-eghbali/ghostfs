@@ -240,10 +240,9 @@ namespace ghostfs::acme {
     }
 
     bool fetch_directory() {
-      httplib::Client cli("acme-v02.api.letsencrypt.org", 443);
-      if (config_.staging) {
-        cli = httplib::Client("acme-staging-v02.api.letsencrypt.org", 443);
-      }
+      std::string url = config_.staging ? "https://acme-staging-v02.api.letsencrypt.org"
+                                        : "https://acme-v02.api.letsencrypt.org";
+      httplib::Client cli(url);
       cli.enable_server_certificate_verification(true);
 
       auto res = cli.Get("/directory");
@@ -260,9 +259,9 @@ namespace ghostfs::acme {
     }
 
     std::string get_nonce() {
-      std::string host = config_.staging ? "acme-staging-v02.api.letsencrypt.org"
-                                         : "acme-v02.api.letsencrypt.org";
-      httplib::Client cli(host, 443);
+      std::string url = config_.staging ? "https://acme-staging-v02.api.letsencrypt.org"
+                                        : "https://acme-v02.api.letsencrypt.org";
+      httplib::Client cli(url);
       cli.enable_server_certificate_verification(true);
 
       // Extract path from URL
@@ -381,7 +380,7 @@ namespace ghostfs::acme {
         }
       }
 
-      httplib::Client cli(host, 443);
+      httplib::Client cli("https://" + host);
       cli.enable_server_certificate_verification(true);
 
       httplib::Headers headers = {{"Content-Type", "application/jose+json"}};
