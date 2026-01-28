@@ -129,6 +129,7 @@ struct ConnectionParams {
   std::string user;
   std::string token;
   std::string cert;
+  bool use_tls = false;
 };
 ConnectionParams g_conn_params;
 
@@ -148,10 +149,15 @@ struct ThreadLocalRpc {
     ioContext = std::make_unique<kj::AsyncIoContext>(kj::setupAsyncIo());
     auto &timer = ioContext->provider->getTimer();
 
-    if (g_conn_params.cert.length()) {
+    if (g_conn_params.cert.length() || g_conn_params.use_tls) {
       kj::TlsContext::Options options;
-      kj::TlsCertificate caCert(g_conn_params.cert);
-      options.trustedCertificates = kj::arrayPtr(&caCert, 1);
+      std::optional<kj::TlsCertificate> caCert;
+      if (g_conn_params.cert.length()) {
+        // Use explicit CA certificate
+        caCert.emplace(g_conn_params.cert);
+        options.trustedCertificates = kj::arrayPtr(&*caCert, 1);
+      }
+      // When no cert is provided (--tls without --cert), use system trust store (default)
 
       kj::TlsContext tls(kj::mv(options));
       auto network = tls.wrapNetwork(ioContext->provider->getNetwork());
@@ -260,10 +266,33 @@ uint64_t get_parent_ino(uint64_t ino, std::string path) {
   return parent_ino;
 }
 
+// Translate open flags from macOS to Linux values for cross-platform RPC
+static int64_t translate_flags_to_linux(int64_t flags) {
+#ifdef __APPLE__
+  // Access mode bits (O_RDONLY=0, O_WRONLY=1, O_RDWR=2) are the same on both platforms
+  int64_t result = flags & O_ACCMODE;
+
+  // macOS flag value → Linux flag value
+  if (flags & 0x0004) result |= 0x0800;      // O_NONBLOCK
+  if (flags & 0x0008) result |= 0x0400;      // O_APPEND
+  if (flags & 0x0080) result |= 0x101000;    // O_SYNC
+  if (flags & 0x0100) result |= 0x20000;     // O_NOFOLLOW
+  if (flags & 0x0200) result |= 0x0040;      // O_CREAT
+  if (flags & 0x0400) result |= 0x0200;      // O_TRUNC
+  if (flags & 0x0800) result |= 0x0080;      // O_EXCL
+  if (flags & 0x100000) result |= 0x10000;   // O_DIRECTORY
+  if (flags & 0x1000000) result |= 0x80000;  // O_CLOEXEC
+
+  return result;
+#else
+  return flags;
+#endif
+}
+
 template <class T> void fillFileInfo(T *fuseFileInfo, struct fuse_file_info *fi) {
   if (!fi) return;
 
-  fuseFileInfo->setFlags(fi->flags);
+  fuseFileInfo->setFlags(translate_flags_to_linux(fi->flags));
   fuseFileInfo->setWritepage(fi->writepage);
   fuseFileInfo->setDirectIo(fi->direct_io);
   fuseFileInfo->setKeepCache(fi->keep_cache);
@@ -2181,7 +2210,7 @@ void capnpErrorHandler(kj::Exception &e) {
 
 int start_fs(char *executable, char *argmnt, std::vector<std::string> options, std::string host,
              int port, std::string user, std::string token, uint8_t write_back_cache_size,
-             uint8_t read_ahead_cache_size, std::string cert_file) {
+             uint8_t read_ahead_cache_size, std::string cert_file, bool use_tls) {
   kj::_::Debug::setLogLevel(kj::_::Debug::Severity::INFO);
 
   // Set cache sizes from parameters (now thread-safe with mutex protection)
@@ -2196,6 +2225,7 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
   g_conn_params.user = user;
   g_conn_params.token = token;
   g_conn_params.cert = cert;
+  g_conn_params.use_tls = use_tls;
 
   // Verify credentials by doing initial authentication on main thread
   try {

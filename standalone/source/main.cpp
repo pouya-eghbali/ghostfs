@@ -1,8 +1,11 @@
+#include <ghostfs/acme.h>
 #include <ghostfs/benchmark.h>
+#include <ghostfs/cert_manager.h>
 #include <ghostfs/copy.h>
 #include <ghostfs/crypto.h>
 #include <ghostfs/fs.h>
 #include <ghostfs/ghostfs.h>
+#include <ghostfs/http.h>
 #include <ghostfs/rpc.h>
 #include <ghostfs/version.h>
 #include <sys/resource.h>
@@ -11,10 +14,12 @@
 #  include <ghostfs/csi.h>
 #endif
 
+#include <chrono>
 #include <cxxopts.hpp>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 auto main(int argc, char** argv) -> int {
@@ -42,6 +47,7 @@ auto main(int argc, char** argv) -> int {
     ("C,read-ahead", "Read ahead cache size", cxxopts::value<uint8_t>()->default_value("8"))
     ("k,key", "TLS key", cxxopts::value<std::string>()->default_value(""))
     ("T,cert", "TLS cert", cxxopts::value<std::string>()->default_value(""))
+    ("tls", "Enable TLS using system trust store (for Let's Encrypt or public CAs)")
     ("A,authorize", "Run in authorizer mode")
     ("m,mount", "Soft mount a directory")
     ("M,mounts", "Get all soft mounts for user")
@@ -59,6 +65,15 @@ auto main(int argc, char** argv) -> int {
     ("encryption-key", "Path to encryption key file", cxxopts::value<std::string>()->default_value(""))
     ("generate-key", "Generate a new encryption key file", cxxopts::value<std::string>())
     ("progress", "Show progress bar for copy operations")
+    ("W,http", "Enable HTTP web server")
+    ("http-port", "HTTP server port", cxxopts::value<uint16_t>()->default_value("8080"))
+    ("http-static", "Static files directory for web UI", cxxopts::value<std::string>()->default_value(""))
+    ("acme", "Enable automatic Let's Encrypt certificates")
+    ("acme-domain", "Domain name for ACME certificate", cxxopts::value<std::string>()->default_value(""))
+    ("acme-email", "Email for Let's Encrypt registration", cxxopts::value<std::string>()->default_value(""))
+    ("acme-staging", "Use Let's Encrypt staging environment (for testing)")
+    ("acme-cert-dir", "Certificate storage directory", cxxopts::value<std::string>()->default_value(""))
+    ("acme-challenge-port", "HTTP-01 challenge port", cxxopts::value<uint16_t>()->default_value("80"))
 #ifdef GHOSTFS_CSI_SUPPORT
     ("csi", "Run as CSI driver")
     ("csi-socket", "CSI socket path", cxxopts::value<std::string>()->default_value("/csi/csi.sock"))
@@ -118,7 +133,168 @@ auto main(int argc, char** argv) -> int {
     }
   }
 
-  if (result["server"].as<bool>()) {
+  bool run_http = result["http"].as<bool>();
+  bool run_server = result["server"].as<bool>();
+
+  // ACME configuration
+  bool use_acme = result["acme"].as<bool>();
+  std::string acme_domain = result["acme-domain"].as<std::string>();
+  std::string acme_email = result["acme-email"].as<std::string>();
+  bool acme_staging = result["acme-staging"].as<bool>();
+  std::string acme_cert_dir = result["acme-cert-dir"].as<std::string>();
+  uint16_t acme_challenge_port = result["acme-challenge-port"].as<uint16_t>();
+
+  // Validate ACME options
+  if (use_acme && (acme_domain.empty() || acme_email.empty())) {
+    std::cerr << "Error: --acme requires --acme-domain and --acme-email" << std::endl;
+    return 1;
+  }
+
+  // Certificate manager (initialized if ACME is enabled)
+  std::unique_ptr<ghostfs::acme::CertManager> cert_manager;
+
+  if (run_http && run_server) {
+    // Combined mode: Run both RPC server and HTTP web server
+    std::string root = result["root"].as<std::string>();
+    std::string bind = result["bind"].as<std::string>();
+    std::string suffix = result["suffix"].as<std::string>();
+    std::string key = result["key"].as<std::string>();
+    std::string cert = result["cert"].as<std::string>();
+    std::string static_dir = result["http-static"].as<std::string>();
+
+    uint16_t port = result["port"].as<uint16_t>();
+    uint16_t auth_port = result["auth-port"].as<uint16_t>();
+    uint16_t http_port = result["http-port"].as<uint16_t>();
+
+    // Default to port 443 when ACME is enabled and user didn't specify a port
+    if (use_acme && result.count("http-port") == 0) {
+      http_port = 443;
+    }
+
+    // Initialize crypto if needed
+    if (!ghostfs::crypto::init()) {
+      std::cerr << "Warning: Failed to initialize encryption support" << std::endl;
+    }
+
+    // Initialize ACME if enabled
+    if (use_acme) {
+      ghostfs::acme::AcmeConfig acme_config;
+      acme_config.domain = acme_domain;
+      acme_config.email = acme_email;
+      acme_config.staging = acme_staging;
+      acme_config.cert_dir
+          = acme_cert_dir.empty() ? ghostfs::acme::get_default_cert_dir() : acme_cert_dir;
+      acme_config.challenge_port = acme_challenge_port;
+
+      cert_manager = std::make_unique<ghostfs::acme::CertManager>(acme_config);
+
+      // Set up challenge callback for HTTP server
+      ghostfs::http::set_acme_challenge_callback([&cert_manager](const std::string& token) {
+        return cert_manager->get_challenge_response(token);
+      });
+
+      if (!cert_manager->init()) {
+        std::cerr << "Error: Failed to initialize ACME certificate manager" << std::endl;
+        return 1;
+      }
+
+      // Get certificate paths
+      auto [cert_path, key_path] = cert_manager->get_cert_paths();
+      if (!cert_path.empty() && !key_path.empty()) {
+        cert = cert_path;
+        key = key_path;
+        std::cout << "Using ACME certificate: " << cert_path << std::endl;
+      }
+
+      // Start background renewal
+      cert_manager->start_renewal_loop();
+    }
+
+    // Increase stack size for RPC server
+    const rlim_t min_stack_size = 64 * 1024 * 1024;
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_STACK, &rl) == 0) {
+      if (rl.rlim_cur < min_stack_size) {
+        rl.rlim_cur = min_stack_size;
+        setrlimit(RLIMIT_STACK, &rl);
+      }
+    }
+
+    // Start RPC server in background thread
+    start_rpc_server_async(bind, port, auth_port, root, suffix, key, cert);
+
+    // Give RPC server time to start
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::cout << "Starting HTTP web server on port " << http_port << "..." << std::endl;
+
+    // Start HTTP server in main thread (this blocks)
+    // Note: HTTP server uses its own auth mechanism, but RPC is available for FUSE clients
+    // Skip auth server since the RPC server already started one
+    return ghostfs::http::start_http_server(bind, http_port, port, auth_port, root, suffix, key,
+                                            cert, static_dir, true);
+
+  } else if (run_http) {
+    // HTTP web server mode only
+    std::string root = result["root"].as<std::string>();
+    std::string bind = result["bind"].as<std::string>();
+    std::string suffix = result["suffix"].as<std::string>();
+    std::string key = result["key"].as<std::string>();
+    std::string cert = result["cert"].as<std::string>();
+    std::string static_dir = result["http-static"].as<std::string>();
+
+    uint16_t port = result["port"].as<uint16_t>();
+    uint16_t auth_port = result["auth-port"].as<uint16_t>();
+    uint16_t http_port = result["http-port"].as<uint16_t>();
+
+    // Default to port 443 when ACME is enabled and user didn't specify a port
+    if (use_acme && result.count("http-port") == 0) {
+      http_port = 443;
+    }
+
+    // Initialize crypto if needed
+    if (!ghostfs::crypto::init()) {
+      std::cerr << "Warning: Failed to initialize encryption support" << std::endl;
+    }
+
+    // Initialize ACME if enabled
+    if (use_acme) {
+      ghostfs::acme::AcmeConfig acme_config;
+      acme_config.domain = acme_domain;
+      acme_config.email = acme_email;
+      acme_config.staging = acme_staging;
+      acme_config.cert_dir
+          = acme_cert_dir.empty() ? ghostfs::acme::get_default_cert_dir() : acme_cert_dir;
+      acme_config.challenge_port = acme_challenge_port;
+
+      cert_manager = std::make_unique<ghostfs::acme::CertManager>(acme_config);
+
+      // Set up challenge callback for HTTP server
+      ghostfs::http::set_acme_challenge_callback([&cert_manager](const std::string& token) {
+        return cert_manager->get_challenge_response(token);
+      });
+
+      if (!cert_manager->init()) {
+        std::cerr << "Error: Failed to initialize ACME certificate manager" << std::endl;
+        return 1;
+      }
+
+      // Get certificate paths
+      auto [cert_path, key_path] = cert_manager->get_cert_paths();
+      if (!cert_path.empty() && !key_path.empty()) {
+        cert = cert_path;
+        key = key_path;
+        std::cout << "Using ACME certificate: " << cert_path << std::endl;
+      }
+
+      // Start background renewal
+      cert_manager->start_renewal_loop();
+    }
+
+    return ghostfs::http::start_http_server(bind, http_port, port, auth_port, root, suffix, key,
+                                            cert, static_dir);
+
+  } else if (run_server) {
     // Increse stack size
 
     const rlim_t min_stack_size = 64 * 1024 * 1024;
@@ -182,9 +358,11 @@ auto main(int argc, char** argv) -> int {
       std::cout << "Client-side encryption enabled" << std::endl;
     }
 
+    bool use_tls = result["tls"].as<bool>();
+
     char* mountpoint_arg = const_cast<char*>(mountpoint.c_str());
     return start_fs(argv[0], mountpoint_arg, fuse_options, host, port, user, token, write_back,
-                    read_ahead, cert);
+                    read_ahead, cert, use_tls);
 
   } else if (result["authorize"].as<bool>()) {
     uint16_t port = result["auth-port"].as<uint16_t>();

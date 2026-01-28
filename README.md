@@ -28,6 +28,8 @@ GhostFS is a FUSE-based distributed filesystem that exposes any local filesystem
 - **Secure** - Token-based authentication with TLS transport encryption
 - **Flexible Access Control** - Per-user directories and soft mounts for fine-grained permissions
 - **Backend Agnostic** - Works with any filesystem (ext4, ZFS, Ceph, NFS, etc.)
+- **Web UI** - Built-in web file manager with drag-and-drop uploads
+- **Auto TLS** - Automatic Let's Encrypt certificates via ACME protocol
 - **Lightweight** - Single binary, minimal dependencies at runtime
 
 ## Quick Start
@@ -106,6 +108,19 @@ TLS OPTIONS:
   --key, -k <file>      TLS private key file
   --cert, -T <file>     TLS certificate file
 
+HTTP WEB SERVER:
+  --http, -W            Enable HTTP web server
+  --http-port <port>    HTTP server port (default: 8080)
+  --http-static <dir>   Static files directory for web UI
+
+ACME (Let's Encrypt):
+  --acme                Enable automatic TLS certificates
+  --acme-domain <name>  Domain name for certificate
+  --acme-email <email>  Email for Let's Encrypt registration
+  --acme-staging        Use staging environment (for testing)
+  --acme-cert-dir <dir> Certificate directory (default: ~/.ghostfs/certs/)
+  --acme-challenge-port Port for HTTP-01 challenge (default: 80)
+
 AUTHORIZATION:
   --user, -u <name>     Username to authorize
   --token, -t <token>   Specific token (optional, auto-generated if omitted)
@@ -150,6 +165,10 @@ sudo dnf install cmake gcc-c++ fuse-devel openssl-devel zlib-devel
 sudo pacman -S cmake base-devel fuse2 openssl zlib
 ```
 
+**For the Web UI** (optional):
+
+- Node.js v18+ and npm (install via [nvm](https://github.com/nvm-sh/nvm) or your package manager)
+
 ### Build
 
 ```bash
@@ -162,6 +181,17 @@ cmake --build build/standalone -j$(nproc)
 
 # Binary is at build/standalone/GhostFS
 ./build/standalone/GhostFS --help
+```
+
+### Build the Web UI (optional)
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+
+# The static files are built to web/build/
 ```
 
 ## Testing
@@ -245,6 +275,46 @@ ghostfs --authorize \
   --source /shared/data \
   --destination /data
 ```
+
+### Web UI
+
+Serve a web-based file manager alongside the RPC server:
+
+```bash
+# Build the web UI first (see Build instructions above)
+
+# Start server with HTTP web UI
+ghostfs --server --http \
+  --root /data/storage \
+  --bind 0.0.0.0 \
+  --port 3444 \
+  --http-port 8080 \
+  --http-static web/build
+
+# Open http://localhost:8080 in your browser
+# Log in with: host=localhost, port=3444, user=myuser, token=<token>
+```
+
+### Automatic TLS with Let's Encrypt
+
+Automatically obtain and renew TLS certificates:
+
+```bash
+# Server with automatic ACME certificates
+ghostfs --server --http \
+  --acme \
+  --acme-domain fs.example.com \
+  --acme-email admin@example.com \
+  --bind 0.0.0.0
+
+# Use staging environment for testing (avoids rate limits)
+ghostfs --server --http \
+  --acme --acme-staging \
+  --acme-domain fs.example.com \
+  --acme-email admin@example.com
+```
+
+Certificates are stored in `~/.ghostfs/certs/` and automatically renewed 30 days before expiry.
 
 ### Performance Tuning
 
