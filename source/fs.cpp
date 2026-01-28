@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <fuse_lowlevel.h>
+#include <ghostfs/crypto.h>
 #include <ghostfs/fs.h>
 #include <ghostfs/uuid.h>
 #include <stdio.h>
@@ -10,13 +11,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <map>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 // Cap'n'Proto
@@ -106,6 +110,12 @@ std::map<uint64_t, cached_read> read_ahead_cache;
 // Mutexes for thread-safe cache access
 std::mutex write_cache_mutex;
 std::mutex read_cache_mutex;
+
+// Encryption state
+static bool g_encryption_enabled = false;
+static uint8_t g_encryption_key[ghostfs::crypto::KEY_SIZE];
+static std::map<uint64_t, ghostfs::crypto::FileContext> g_crypto_contexts;  // keyed by file handle
+static std::mutex g_crypto_mutex;
 
 std::map<uint64_t, std::string> ino_to_path;
 std::map<std::string, uint64_t> path_to_ino;
@@ -225,12 +235,12 @@ auto waitWithTimeout(Promise &&promise, kj::Timer &timer, kj::WaitScope &waitSco
   return kj::fwd<Promise>(promise).exclusiveJoin(kj::mv(timeout)).wait(waitScope);
 }
 
-#define min(x, y) ((x) < (y) ? (x) : (y))
+#define LOCAL_MIN(x, y) ((x) < (y) ? (x) : (y))
 
 static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize, off_t off,
                              size_t maxsize) {
   if (off < (int64_t)bufsize) {
-    return fuse_reply_buf(req, buf + off, min(bufsize - off, maxsize));
+    return fuse_reply_buf(req, buf + off, LOCAL_MIN(bufsize - off, maxsize));
 
   } else {
     return fuse_reply_buf(req, NULL, 0);
@@ -388,6 +398,11 @@ static void ghostfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
     attr.st_blksize = attributes.getStBlksize();
     attr.st_blocks = attributes.getStBlocks();
 
+    // Translate physical to logical size for encrypted regular files
+    if (g_encryption_enabled && S_ISREG(attr.st_mode)) {
+      attr.st_size = ghostfs::crypto::physical_to_logical_size(attr.st_size);
+    }
+
     fuse_reply_attr(req, &attr, 1.0);
   } catch (const kj::Exception &e) {
     std::cerr << "getattr error: " << e.getDescription().cStr() << std::endl;
@@ -451,9 +466,14 @@ static void ghostfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *nam
     e.attr.st_blksize = attributes.getStBlksize();
     e.attr.st_blocks = attributes.getStBlocks();
 
+    // Translate physical to logical size for encrypted regular files
+    if (g_encryption_enabled && S_ISREG(e.attr.st_mode)) {
+      e.attr.st_size = ghostfs::crypto::physical_to_logical_size(e.attr.st_size);
+    }
+
     fuse_reply_entry(req, &e);
-  } catch (const kj::Exception &e) {
-    std::cerr << "lookup error: " << e.getDescription().cStr() << std::endl;
+  } catch (const kj::Exception &ex) {
+    std::cerr << "lookup error: " << ex.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
 }
@@ -554,7 +574,18 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
 
     open.setIno(ino);
 
-    fillFileInfo(&fuseFileInfo, fi);
+    // For encrypted files:
+    // 1. Strip O_APPEND - Linux's pwrite() with O_APPEND ignores offset
+    // 2. Ensure O_RDWR for RMW operations (partial block writes need to read existing data)
+    struct fuse_file_info fi_for_server = *fi;
+    if (g_encryption_enabled) {
+      fi_for_server.flags &= ~O_APPEND;
+      // If file was opened write-only, upgrade to read-write for RMW support
+      if ((fi_for_server.flags & O_ACCMODE) == O_WRONLY) {
+        fi_for_server.flags = (fi_for_server.flags & ~O_ACCMODE) | O_RDWR;
+      }
+    }
+    fillFileInfo(&fuseFileInfo, &fi_for_server);
 
     auto result = waitWithTimeout(request.send(), timer, waitScope);
     auto response = result.getRes();
@@ -570,6 +601,42 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
     OpenResponse::FuseFileInfo::Reader fi_response = response.getFi();
 
     fi->fh = fi_response.getFh();
+
+    // Initialize crypto context for encrypted files
+    if (g_encryption_enabled) {
+      ghostfs::crypto::FileContext ctx;
+      ctx.is_encrypted = true;
+      ctx.plaintext_size = -1;  // Unknown until first access
+      std::memset(ctx.file_id, 0, ghostfs::crypto::FILE_ID_SIZE);
+
+      // Try to read the header from existing file
+      auto headerRequest = rpc.client->readRequest();
+      Read::Builder headerRead = headerRequest.getReq();
+      Read::FuseFileInfo::Builder headerFi = headerRead.initFi();
+
+      headerRead.setIno(ino);
+      headerRead.setSize(ghostfs::crypto::HEADER_SIZE);
+      headerRead.setOff(0);
+      fillFileInfo(&headerFi, fi);
+
+      auto headerResult = waitWithTimeout(headerRequest.send(), timer, waitScope);
+      auto headerResponse = headerResult.getRes();
+
+      if (headerResponse.getRes() >= static_cast<int>(ghostfs::crypto::HEADER_SIZE)) {
+        // File has a header, parse it
+        capnp::Data::Reader headerBuf = headerResponse.getBuf();
+        const uint8_t* headerData = headerBuf.asBytes().begin();
+        uint16_t version;
+        if (ghostfs::crypto::parse_header(headerData, ghostfs::crypto::HEADER_SIZE, ctx.file_id,
+                                          &version)) {
+          ctx.is_encrypted = true;
+        }
+      }
+      // If no header or parsing failed, file_id stays zeroed and will be created on first write
+
+      std::lock_guard<std::mutex> lock(g_crypto_mutex);
+      g_crypto_contexts[fi->fh] = ctx;
+    }
 
     fuse_reply_open(req, fi);
   } catch (const kj::Exception &e) {
@@ -600,6 +667,418 @@ bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
 
   fuse_reply_buf(req, cache.buf + (off - cache.off), size);
   return true;
+}
+
+// Encrypted read: reads and decrypts data from server
+static void encrypted_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
+                           struct fuse_file_info* fi) {
+  using namespace ghostfs::crypto;
+
+  try {
+    auto& rpc = getRpc();
+    auto& waitScope = rpc.ioContext->waitScope;
+    auto& timer = rpc.getTimer();
+
+    // Calculate block range needed
+    size_t start_block = get_block_number(off);
+    size_t end_block = get_block_number(off + size - 1);
+    size_t offset_in_first_block = get_offset_in_block(off);
+
+    // Calculate physical read range
+    int64_t phys_start = HEADER_SIZE + start_block * ENCRYPTED_BLOCK_SIZE;
+    int64_t phys_size = (end_block - start_block + 1) * ENCRYPTED_BLOCK_SIZE;
+
+    // Request encrypted blocks from server
+    auto request = rpc.client->readRequest();
+    Read::Builder read = request.getReq();
+    Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
+
+    read.setIno(ino);
+    read.setSize(phys_size);
+    read.setOff(phys_start);
+    fillFileInfo(&fuseFileInfo, fi);
+
+    auto result = waitWithTimeout(request.send(), timer, waitScope);
+    auto response = result.getRes();
+
+    int res = response.getRes();
+    if (res == -1) {
+      fuse_reply_err(req, response.getErrno());
+      return;
+    }
+
+    if (res == 0) {
+      // EOF
+      fuse_reply_buf(req, nullptr, 0);
+      return;
+    }
+
+    capnp::Data::Reader buf_reader = response.getBuf();
+    const uint8_t* encrypted_data = buf_reader.asBytes().begin();
+    size_t encrypted_len = static_cast<size_t>(res);
+
+    // Count complete blocks in the response
+    size_t num_blocks = 0;
+    size_t enc_offset = 0;
+    while (enc_offset < encrypted_len) {
+      size_t block_enc_size = (std::min)(ENCRYPTED_BLOCK_SIZE, encrypted_len - enc_offset);
+      if (block_enc_size < NONCE_SIZE + TAG_SIZE) break;
+      num_blocks++;
+      enc_offset += block_enc_size;
+    }
+
+    // Allocate buffer for decrypted plaintext
+    size_t max_plaintext = num_blocks * BLOCK_SIZE;
+    std::vector<uint8_t> plaintext_buf(max_plaintext);
+    std::vector<size_t> block_lengths(num_blocks);
+    std::atomic<bool> decryption_failed{false};
+
+    // Parallel decryption for multiple blocks
+    const size_t num_threads = std::min(num_blocks, (size_t)std::thread::hardware_concurrency());
+
+    if (num_blocks >= 4 && num_threads > 1) {
+      std::vector<std::future<void>> futures;
+      futures.reserve(num_threads);
+
+      size_t blocks_per_thread = num_blocks / num_threads;
+      size_t remaining_blocks = num_blocks % num_threads;
+
+      size_t block_start = 0;
+      for (size_t t = 0; t < num_threads; t++) {
+        size_t thread_blocks = blocks_per_thread + (t < remaining_blocks ? 1 : 0);
+        size_t thread_start = block_start;
+
+        futures.push_back(std::async(std::launch::async, [&, thread_start, thread_blocks]() {
+          for (size_t i = 0; i < thread_blocks && !decryption_failed; i++) {
+            size_t block_idx = thread_start + i;
+            size_t block_enc_offset = block_idx * ENCRYPTED_BLOCK_SIZE;
+            size_t block_enc_size = (std::min)(ENCRYPTED_BLOCK_SIZE, encrypted_len - block_enc_offset);
+
+            uint8_t* out_ptr = plaintext_buf.data() + (block_idx * BLOCK_SIZE);
+
+            if (!decrypt_block(encrypted_data + block_enc_offset, block_enc_size,
+                               g_encryption_key, out_ptr, &block_lengths[block_idx])) {
+              decryption_failed = true;
+            }
+          }
+        }));
+
+        block_start += thread_blocks;
+      }
+
+      for (auto& f : futures) {
+        f.get();
+      }
+    } else {
+      // Sequential decryption for small reads
+      enc_offset = 0;
+      for (size_t i = 0; i < num_blocks; i++) {
+        size_t block_enc_size = (std::min)(ENCRYPTED_BLOCK_SIZE, encrypted_len - enc_offset);
+        uint8_t* out_ptr = plaintext_buf.data() + (i * BLOCK_SIZE);
+
+        if (!decrypt_block(encrypted_data + enc_offset, block_enc_size,
+                           g_encryption_key, out_ptr, &block_lengths[i])) {
+          decryption_failed = true;
+          break;
+        }
+        enc_offset += block_enc_size;
+      }
+    }
+
+    if (decryption_failed) {
+      std::cerr << "Decryption failed" << std::endl;
+      fuse_reply_err(req, EIO);
+      return;
+    }
+
+    // Compact plaintext blocks (they're at fixed offsets but may have variable lengths)
+    // For most blocks this is a no-op since they're full BLOCK_SIZE
+    size_t plaintext_total = 0;
+    for (size_t i = 0; i < num_blocks; i++) {
+      if (i > 0 && block_lengths[i] > 0) {
+        // Move block data to compact position if there's a gap
+        size_t expected_offset = plaintext_total;
+        size_t actual_offset = i * BLOCK_SIZE;
+        if (actual_offset != expected_offset) {
+          std::memmove(plaintext_buf.data() + expected_offset,
+                       plaintext_buf.data() + actual_offset, block_lengths[i]);
+        }
+      }
+      plaintext_total += block_lengths[i];
+    }
+
+    // Extract requested range from plaintext
+    if (plaintext_total <= offset_in_first_block) {
+      fuse_reply_buf(req, nullptr, 0);
+      return;
+    }
+
+    size_t available = plaintext_total - offset_in_first_block;
+    size_t reply_size = (std::min)(size, available);
+
+    fuse_reply_buf(req, reinterpret_cast<const char*>(plaintext_buf.data() + offset_in_first_block),
+                   reply_size);
+
+  } catch (const kj::Exception& e) {
+    std::cerr << "encrypted_read error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
+}
+
+// Encrypted write: encrypts and writes data to server
+static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char* buf, size_t size, off_t off,
+                            struct fuse_file_info* fi) {
+  using namespace ghostfs::crypto;
+
+  // Create a copy of fi without O_APPEND flag - we manage offsets ourselves
+  struct fuse_file_info fi_no_append = *fi;
+  fi_no_append.flags &= ~O_APPEND;
+
+  try {
+    auto& rpc = getRpc();
+    auto& waitScope = rpc.ioContext->waitScope;
+    auto& timer = rpc.getTimer();
+
+    // Check if we need to write the header first (file doesn't have one yet)
+    {
+      std::lock_guard<std::mutex> lock(g_crypto_mutex);
+      auto it = g_crypto_contexts.find(fi->fh);
+      if (it != g_crypto_contexts.end()) {
+        // Check if file_id is all zeros (no header yet)
+        bool needs_header = true;
+        for (size_t i = 0; i < FILE_ID_SIZE; i++) {
+          if (it->second.file_id[i] != 0) {
+            needs_header = false;
+            break;
+          }
+        }
+
+        // Only write a new header if:
+        // 1. file_id is zeros (no header read during open)
+        // 2. Write starts at offset 0 (new file, not append)
+        // If offset > 0, file must already exist with a header - try to read it
+        if (needs_header) {
+          if (off == 0) {
+            // New file - write header
+            uint8_t header[HEADER_SIZE];
+            create_header(header);
+
+            auto headerRequest = rpc.client->writeRequest();
+            Write::Builder headerWrite = headerRequest.getReq();
+            Write::FuseFileInfo::Builder headerFi = headerWrite.initFi();
+
+            kj::ArrayPtr<kj::byte> hdr_ptr = kj::arrayPtr((kj::byte*)header, HEADER_SIZE);
+            capnp::Data::Reader hdr_reader(hdr_ptr);
+
+            headerWrite.setIno(ino);
+            headerWrite.setBuf(hdr_reader);
+            headerWrite.setSize(HEADER_SIZE);
+            headerWrite.setOff(0);
+            fillFileInfo(&headerFi, &fi_no_append);
+
+            auto headerResult = waitWithTimeout(headerRequest.send(), timer, waitScope);
+            auto headerResponse = headerResult.getRes();
+
+            if (headerResponse.getRes() == -1) {
+              std::cerr << "Failed to write encryption header" << std::endl;
+              fuse_reply_err(req, headerResponse.getErrno());
+              return;
+            }
+
+            std::memcpy(it->second.file_id, header + 2, FILE_ID_SIZE);
+          } else {
+            // Append to existing file - try to read header now
+            auto headerRequest = rpc.client->readRequest();
+            Read::Builder headerRead = headerRequest.getReq();
+            Read::FuseFileInfo::Builder headerFi = headerRead.initFi();
+
+            headerRead.setIno(ino);
+            headerRead.setSize(HEADER_SIZE);
+            headerRead.setOff(0);
+            fillFileInfo(&headerFi, &fi_no_append);
+
+            auto headerResult = waitWithTimeout(headerRequest.send(), timer, waitScope);
+            auto headerResponse = headerResult.getRes();
+
+            if (headerResponse.getRes() >= static_cast<int>(HEADER_SIZE)) {
+              capnp::Data::Reader headerBuf = headerResponse.getBuf();
+              const uint8_t* headerData = headerBuf.asBytes().begin();
+              uint16_t version;
+              if (parse_header(headerData, HEADER_SIZE, it->second.file_id, &version)) {
+                it->second.is_encrypted = true;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const uint8_t* input = reinterpret_cast<const uint8_t*>(buf);
+
+    // Calculate block range
+    size_t first_block = get_block_number(off);
+    size_t first_block_offset = get_offset_in_block(off);
+    size_t last_byte = off + size - 1;
+    size_t last_block = get_block_number(last_byte);
+    size_t last_block_end = get_offset_in_block(last_byte) + 1;  // exclusive
+    size_t total_blocks = last_block - first_block + 1;
+
+    // Determine which blocks need RMW (partial blocks)
+    bool first_partial = (first_block_offset > 0);
+    bool last_partial = (last_block_end < BLOCK_SIZE) && (last_block != first_block || !first_partial);
+    // Special case: single partial block
+    if (first_block == last_block && (first_block_offset > 0 || last_block_end < BLOCK_SIZE)) {
+      first_partial = true;
+      last_partial = false;
+    }
+
+    // Allocate plaintext buffer for all blocks
+    std::vector<uint8_t> plaintext_buf(total_blocks * BLOCK_SIZE, 0);
+    std::vector<size_t> plaintext_lens(total_blocks, BLOCK_SIZE);
+
+    // STEP 1: Read partial blocks that need RMW (single RPC for both if needed)
+    if (first_partial || last_partial) {
+      // Determine what to read: just first, just last, or both
+      size_t read_first = first_partial ? first_block : last_block;
+      size_t read_last = last_partial ? last_block : first_block;
+      size_t blocks_to_read = read_last - read_first + 1;
+
+      int64_t read_start = HEADER_SIZE + read_first * ENCRYPTED_BLOCK_SIZE;
+      size_t read_size = blocks_to_read * ENCRYPTED_BLOCK_SIZE;
+
+      auto readRequest = rpc.client->readRequest();
+      Read::Builder read = readRequest.getReq();
+      Read::FuseFileInfo::Builder readFi = read.initFi();
+
+      read.setIno(ino);
+      read.setSize(read_size);
+      read.setOff(read_start);
+      fillFileInfo(&readFi, &fi_no_append);
+
+      auto readResult = waitWithTimeout(readRequest.send(), timer, waitScope);
+      auto readResponse = readResult.getRes();
+
+      if (readResponse.getRes() > 0) {
+        capnp::Data::Reader blockBuf = readResponse.getBuf();
+        const uint8_t* enc_data = blockBuf.asBytes().begin();
+        size_t enc_len = static_cast<size_t>(readResponse.getRes());
+
+        // Decrypt first partial block if needed
+        if (first_partial && enc_len >= NONCE_SIZE + TAG_SIZE) {
+          size_t block_enc_size = (std::min)(ENCRYPTED_BLOCK_SIZE, enc_len);
+          size_t dec_len;
+          if (decrypt_block(enc_data, block_enc_size, g_encryption_key,
+                            plaintext_buf.data(), &dec_len)) {
+            plaintext_lens[0] = dec_len;
+          }
+        }
+
+        // Decrypt last partial block if needed and different from first
+        if (last_partial && last_block != first_block) {
+          size_t last_offset_in_read = (last_block - read_first) * ENCRYPTED_BLOCK_SIZE;
+          if (last_offset_in_read < enc_len) {
+            size_t block_enc_size = (std::min)(ENCRYPTED_BLOCK_SIZE, enc_len - last_offset_in_read);
+            if (block_enc_size >= NONCE_SIZE + TAG_SIZE) {
+              size_t dec_len;
+              size_t last_plain_offset = (last_block - first_block) * BLOCK_SIZE;
+              if (decrypt_block(enc_data + last_offset_in_read, block_enc_size, g_encryption_key,
+                                plaintext_buf.data() + last_plain_offset, &dec_len)) {
+                plaintext_lens[last_block - first_block] = dec_len;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // STEP 2: Merge new data into plaintext blocks
+    size_t input_offset = 0;
+    for (size_t i = 0; i < total_blocks; i++) {
+      size_t block_num = first_block + i;
+      size_t block_start_in_write = (i == 0) ? first_block_offset : 0;
+      size_t block_end_in_write = (block_num == last_block) ? last_block_end : BLOCK_SIZE;
+      size_t bytes_in_block = block_end_in_write - block_start_in_write;
+
+      uint8_t* block_ptr = plaintext_buf.data() + (i * BLOCK_SIZE);
+      std::memcpy(block_ptr + block_start_in_write, input + input_offset, bytes_in_block);
+      input_offset += bytes_in_block;
+
+      // Update plaintext length if we're extending the block
+      if (block_end_in_write > plaintext_lens[i]) {
+        plaintext_lens[i] = block_end_in_write;
+      }
+    }
+
+    // STEP 3: Encrypt all blocks (parallel for large batches)
+    std::vector<uint8_t> encrypted_buf(total_blocks * ENCRYPTED_BLOCK_SIZE);
+    std::atomic<bool> encryption_failed{false};
+
+    const size_t num_threads = std::min(total_blocks, (size_t)std::thread::hardware_concurrency());
+    if (total_blocks >= 4 && num_threads > 1) {
+      std::vector<std::future<void>> futures;
+      size_t blocks_per_thread = total_blocks / num_threads;
+      size_t extra = total_blocks % num_threads;
+      size_t start = 0;
+
+      for (size_t t = 0; t < num_threads; t++) {
+        size_t count = blocks_per_thread + (t < extra ? 1 : 0);
+        futures.push_back(std::async(std::launch::async, [&, start, count]() {
+          for (size_t i = 0; i < count && !encryption_failed; i++) {
+            size_t idx = start + i;
+            if (!encrypt_block(plaintext_buf.data() + idx * BLOCK_SIZE, plaintext_lens[idx],
+                               g_encryption_key, encrypted_buf.data() + idx * ENCRYPTED_BLOCK_SIZE)) {
+              encryption_failed = true;
+            }
+          }
+        }));
+        start += count;
+      }
+      for (auto& f : futures) f.get();
+    } else {
+      for (size_t i = 0; i < total_blocks && !encryption_failed; i++) {
+        if (!encrypt_block(plaintext_buf.data() + i * BLOCK_SIZE, plaintext_lens[i],
+                           g_encryption_key, encrypted_buf.data() + i * ENCRYPTED_BLOCK_SIZE)) {
+          encryption_failed = true;
+        }
+      }
+    }
+
+    if (encryption_failed) {
+      fuse_reply_err(req, EIO);
+      return;
+    }
+
+    // STEP 4: Single batch write for ALL blocks (1 RPC)
+    size_t total_enc_size = total_blocks * ENCRYPTED_BLOCK_SIZE;
+    int64_t phys_offset = HEADER_SIZE + first_block * ENCRYPTED_BLOCK_SIZE;
+
+    auto writeRequest = rpc.client->writeRequest();
+    Write::Builder write = writeRequest.getReq();
+    Write::FuseFileInfo::Builder writeFi = write.initFi();
+
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)encrypted_buf.data(), total_enc_size);
+    capnp::Data::Reader buf_reader(buf_ptr);
+
+    write.setIno(ino);
+    write.setBuf(buf_reader);
+    write.setSize(total_enc_size);
+    write.setOff(phys_offset);
+    fillFileInfo(&writeFi, &fi_no_append);
+
+    auto writeResult = waitWithTimeout(writeRequest.send(), timer, waitScope);
+    auto writeResponse = writeResult.getRes();
+
+    if (writeResponse.getRes() == -1) {
+      fuse_reply_err(req, writeResponse.getErrno());
+      return;
+    }
+
+    fuse_reply_write(req, size);
+
+  } catch (const kj::Exception& e) {
+    std::cerr << "encrypted_write error: " << e.getDescription().cStr() << std::endl;
+    fuse_reply_err(req, ETIMEDOUT);
+  }
 }
 
 void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
@@ -638,7 +1117,7 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
     const auto chars = buf_reader.asChars();
     const char *buf = chars.begin();
 
-    fuse_reply_buf(req, buf, min(size, static_cast<size_t>(res)));
+    fuse_reply_buf(req, buf, LOCAL_MIN(size, static_cast<size_t>(res)));
 
     if (static_cast<size_t>(res) > size) {
       std::lock_guard<std::mutex> lock(read_cache_mutex);
@@ -681,6 +1160,12 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
  */
 static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                             struct fuse_file_info *fi) {
+  // Use encrypted read when encryption is enabled
+  if (g_encryption_enabled) {
+    encrypted_read(req, ino, size, off, fi);
+    return;
+  }
+
   if (max_read_ahead_cache > 0) {
     bool is_cached = reply_from_cache(req, fi->fh, size, off);
 
@@ -833,6 +1318,12 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
  */
 static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size,
                              off_t off, struct fuse_file_info *fi) {
+  // Use encrypted write when encryption is enabled
+  if (g_encryption_enabled) {
+    encrypted_write(req, ino, buf, size, off, fi);
+    return;
+  }
+
   if (max_read_ahead_cache > 0) {
     std::lock_guard<std::mutex> lock(read_cache_mutex);
     if (read_ahead_cache.contains(fi->fh)) {
@@ -1131,7 +1622,18 @@ static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *nam
     create.setName(name);
     create.setMode(mode);
 
-    fillFileInfo(&fuseFileInfo, fi);
+    // For encrypted files:
+    // 1. Strip O_APPEND - Linux's pwrite() with O_APPEND ignores offset
+    // 2. Ensure O_RDWR for RMW operations (partial block writes need to read existing data)
+    struct fuse_file_info fi_for_server = *fi;
+    if (g_encryption_enabled) {
+      fi_for_server.flags &= ~O_APPEND;
+      // If file was opened write-only, upgrade to read-write for RMW support
+      if ((fi_for_server.flags & O_ACCMODE) == O_WRONLY) {
+        fi_for_server.flags = (fi_for_server.flags & ~O_ACCMODE) | O_RDWR;
+      }
+    }
+    fillFileInfo(&fuseFileInfo, &fi_for_server);
 
     auto result = waitWithTimeout(request.send(), timer, waitScope);
     auto response = result.getRes();
@@ -1174,9 +1676,51 @@ static void ghostfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *nam
 
     fi->fh = fi_response.getFh();
 
+    // Write encryption header for new files
+    if (g_encryption_enabled) {
+      uint8_t header[ghostfs::crypto::HEADER_SIZE];
+      ghostfs::crypto::create_header(header);
+
+      // Write header to file via RPC
+      auto writeRequest = rpc.client->writeRequest();
+      Write::Builder write = writeRequest.getReq();
+      Write::FuseFileInfo::Builder writeFi = write.initFi();
+
+      kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)header, ghostfs::crypto::HEADER_SIZE);
+      capnp::Data::Reader buf_reader(buf_ptr);
+
+      write.setIno(e.ino);
+      write.setBuf(buf_reader);
+      write.setSize(ghostfs::crypto::HEADER_SIZE);
+      write.setOff(0);
+      fillFileInfo(&writeFi, fi);
+
+      auto writeResult = waitWithTimeout(writeRequest.send(), timer, waitScope);
+      auto writeResponse = writeResult.getRes();
+
+      if (writeResponse.getRes() == -1) {
+        std::cerr << "Failed to write encryption header" << std::endl;
+        fuse_reply_err(req, writeResponse.getErrno());
+        return;
+      }
+
+      // Initialize crypto context
+      {
+        std::lock_guard<std::mutex> lock(g_crypto_mutex);
+        ghostfs::crypto::FileContext ctx;
+        ctx.is_encrypted = true;
+        ctx.plaintext_size = 0;  // New file, empty
+        std::memcpy(ctx.file_id, header + 2, ghostfs::crypto::FILE_ID_SIZE);
+        g_crypto_contexts[fi->fh] = ctx;
+      }
+
+      // Report size as 0 (logical size) since we just created it
+      e.attr.st_size = 0;
+    }
+
     fuse_reply_create(req, &e, fi);
-  } catch (const kj::Exception &e) {
-    std::cerr << "create error: " << e.getDescription().cStr() << std::endl;
+  } catch (const kj::Exception &ex) {
+    std::cerr << "create error: " << ex.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
   }
 }
@@ -1281,6 +1825,12 @@ static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
 static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
   // Flush any pending writes before releasing the file handle
   flush_write_back_cache(fi->fh, false);
+
+  // Cleanup crypto context
+  if (g_encryption_enabled) {
+    std::lock_guard<std::mutex> lock(g_crypto_mutex);
+    g_crypto_contexts.erase(fi->fh);
+  }
 
   try {
     auto &rpc = getRpc();
@@ -1454,7 +2004,13 @@ static void ghostfs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr
     attributes.setStUid(attr->st_uid);
     attributes.setStGid(attr->st_gid);
     attributes.setStRdev(attr->st_rdev);
-    attributes.setStSize(attr->st_size);
+
+    // Translate logical size to physical size for encrypted files during truncate
+    int64_t size_to_set = attr->st_size;
+    if (g_encryption_enabled && (to_set & FUSE_SET_ATTR_SIZE)) {
+      size_to_set = ghostfs::crypto::logical_to_physical_size(attr->st_size);
+    }
+    attributes.setStSize(size_to_set);
     attributes.setStCtime(attr->st_ctime);
     attributes.setStBlksize(attr->st_blksize);
     attributes.setStBlocks(attr->st_blocks);
@@ -1585,6 +2141,15 @@ static const struct fuse_lowlevel_ops ghostfs_ll_oper = {
 // clang-format on
 
 std::string read_file(const std::string &path);
+
+// Encryption helper functions
+void set_encryption_enabled(bool enabled) { g_encryption_enabled = enabled; }
+
+bool is_encryption_enabled() { return g_encryption_enabled; }
+
+bool load_encryption_key(const std::string& key_path) {
+  return ghostfs::crypto::load_key_file(key_path, g_encryption_key);
+}
 
 void free_capnp_resources() {
   // Thread-local Cap'n Proto resources are cleaned up automatically

@@ -2,15 +2,17 @@
 set -e
 
 # GhostFS Docker Benchmark Entrypoint
-# Sets up server/client and runs the built-in benchmark
+# Sets up server/client and runs the built-in benchmark (with and without encryption)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_header() { echo -e "${CYAN}$1${NC}"; }
 
 # Configuration
 ROOT="/tmp/ghostfs-bench-root"
@@ -21,6 +23,7 @@ AUTH_PORT="3445"
 USER="benchuser"
 CACHE_SIZE="${GHOSTFS_CACHE:-255}"
 GHOSTFS="./build/standalone/GhostFS"
+ENCRYPTION_KEY="/tmp/ghostfs-benchmark-encryption.key"
 
 # Benchmark settings (can be overridden via env vars)
 SMALL_FILES="${GHOSTFS_SMALL_FILES:-1000}"
@@ -33,6 +36,7 @@ cleanup() {
     fusermount -u "$MOUNT" 2>/dev/null || true
     pkill -f "GhostFS.*--server" 2>/dev/null || true
     pkill -f "GhostFS.*--client" 2>/dev/null || true
+    rm -f "$ENCRYPTION_KEY" 2>/dev/null || true
     sleep 1
 }
 
@@ -44,6 +48,7 @@ mkdir -p "$ROOT/$USER" "$MOUNT"
 # Start server
 log_info "Starting GhostFS server..."
 $GHOSTFS --server --root "$ROOT" --bind "$HOST" --port "$PORT" --auth-port "$AUTH_PORT" &
+SERVER_PID=$!
 sleep 2
 
 # Get token
@@ -54,8 +59,18 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
-# Mount client
-log_info "Mounting GhostFS client (cache=$CACHE_SIZE)..."
+# ============================================================================
+# Benchmark WITHOUT encryption
+# ============================================================================
+
+log_header "
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Benchmark: WITHOUT Encryption
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"
+
+# Mount client (no encryption, with read-ahead cache using zero-copy)
+log_info "Mounting GhostFS client (cache=$CACHE_SIZE, encryption=OFF, read-ahead=$CACHE_SIZE)..."
 $GHOSTFS --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
     --write-back "$CACHE_SIZE" --read-ahead "$CACHE_SIZE" \
     -o big_writes -o max_read=1048576 -o max_write=1048576 "$MOUNT" &
@@ -70,7 +85,53 @@ fi
 log_info "GhostFS mounted successfully"
 echo ""
 
-# Run benchmark
+# Run benchmark without encryption
+$GHOSTFS --benchmark --dir "$MOUNT" \
+    --small-files "$SMALL_FILES" \
+    --small-size "$SMALL_SIZE" \
+    --large-size "$LARGE_SIZE" \
+    --jobs "$JOBS"
+
+# Unmount
+log_info "Unmounting for encrypted benchmark..."
+fusermount -u "$MOUNT" 2>/dev/null || true
+sleep 2
+
+# Clean up benchmark data
+rm -rf "$ROOT/$USER"/*
+
+# ============================================================================
+# Benchmark WITH encryption
+# ============================================================================
+
+log_header "
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Benchmark: WITH Encryption (XChaCha20-Poly1305)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"
+
+# Generate encryption key
+log_info "Generating encryption key..."
+$GHOSTFS --generate-key "$ENCRYPTION_KEY"
+
+# Mount client with encryption
+log_info "Mounting GhostFS client (cache=$CACHE_SIZE, encryption=ON)..."
+$GHOSTFS --client --host "$HOST" --port "$PORT" --user "$USER" --token "$TOKEN" \
+    --encrypt --encryption-key "$ENCRYPTION_KEY" \
+    --write-back "$CACHE_SIZE" --read-ahead "$CACHE_SIZE" \
+    -o big_writes -o max_read=1048576 -o max_write=1048576 "$MOUNT" &
+sleep 3
+
+# Verify mount
+if ! ls "$MOUNT" &>/dev/null; then
+    log_error "Encrypted mount failed"
+    exit 1
+fi
+
+log_info "Encrypted GhostFS mounted successfully"
+echo ""
+
+# Run benchmark with encryption
 $GHOSTFS --benchmark --dir "$MOUNT" \
     --small-files "$SMALL_FILES" \
     --small-size "$SMALL_SIZE" \

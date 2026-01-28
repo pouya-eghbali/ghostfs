@@ -26,3 +26,8 @@ struct dirbuf {
 void dirbuf_add(fuse_req_t req, struct dirbuf* b, const char* name, fuse_ino_t ino);
 
 uint64_t get_parent_ino(uint64_t ino, std::string path);
+
+// Encryption support
+void set_encryption_enabled(bool enabled);
+bool is_encryption_enabled();
+bool load_encryption_key(const std::string& key_path);

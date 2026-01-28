@@ -1,4 +1,5 @@
 #include <ghostfs/benchmark.h>
+#include <ghostfs/crypto.h>
 #include <ghostfs/fs.h>
 #include <ghostfs/ghostfs.h>
 #include <ghostfs/rpc.h>
@@ -53,6 +54,9 @@ auto main(int argc, char** argv) -> int {
     ("large-size", "Size of large file in MB", cxxopts::value<uint32_t>()->default_value("1000"))
     ("jobs", "Parallel jobs for benchmark", cxxopts::value<uint8_t>()->default_value("8"))
     ("no-verify", "Skip integrity verification")
+    ("e,encrypt", "Enable client-side encryption")
+    ("encryption-key", "Path to encryption key file", cxxopts::value<std::string>()->default_value(""))
+    ("generate-key", "Generate a new encryption key file", cxxopts::value<std::string>())
 #ifdef GHOSTFS_CSI_SUPPORT
     ("csi", "Run as CSI driver")
     ("csi-socket", "CSI socket path", cxxopts::value<std::string>()->default_value("/csi/csi.sock"))
@@ -74,6 +78,22 @@ auto main(int argc, char** argv) -> int {
   if (result["version"].as<bool>()) {
     std::cout << "GhostFS, version " << GHOSTFS_VERSION << std::endl;
     return 0;
+  }
+
+  // Key generation command
+  if (result.count("generate-key")) {
+    if (!ghostfs::crypto::init()) {
+      std::cerr << "Failed to initialize encryption" << std::endl;
+      return 1;
+    }
+    std::string key_path = result["generate-key"].as<std::string>();
+    if (ghostfs::crypto::generate_key_file(key_path)) {
+      std::cout << "Encryption key generated: " << key_path << std::endl;
+      return 0;
+    } else {
+      std::cerr << "Failed to generate encryption key" << std::endl;
+      return 1;
+    }
   }
 
   if (result["server"].as<bool>()) {
@@ -117,6 +137,27 @@ auto main(int argc, char** argv) -> int {
     if (mountpoint.empty()) {
       std::cerr << "Error: mountpoint is required for client mode" << std::endl;
       return 1;
+    }
+
+    // Handle encryption
+    bool encrypt = result["encrypt"].as<bool>();
+    std::string encryption_key = result["encryption-key"].as<std::string>();
+
+    if (encrypt) {
+      if (encryption_key.empty()) {
+        std::cerr << "Error: --encrypt requires --encryption-key" << std::endl;
+        return 1;
+      }
+      if (!ghostfs::crypto::init()) {
+        std::cerr << "Failed to initialize encryption" << std::endl;
+        return 1;
+      }
+      if (!load_encryption_key(encryption_key)) {
+        std::cerr << "Failed to load encryption key: " << encryption_key << std::endl;
+        return 1;
+      }
+      set_encryption_enabled(true);
+      std::cout << "Client-side encryption enabled" << std::endl;
     }
 
     char* mountpoint_arg = const_cast<char*>(mountpoint.c_str());

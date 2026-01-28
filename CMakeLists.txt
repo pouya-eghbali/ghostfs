@@ -60,6 +60,7 @@ CPMAddPackage(
   OPTIONS "FMT_INSTALL YES" # create an installable target
 )
 
+
 # ---- CSI Support (optional, requires gRPC) ----
 if(GHOSTFS_CSI_SUPPORT)
   if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -160,6 +161,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::capnp)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::capnp-rpc)
 target_link_libraries(${PROJECT_NAME} PRIVATE CapnProto::kj-tls)
 target_link_libraries(${PROJECT_NAME} PUBLIC ${FUSE_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::Crypto)
 
 # uuid_v4 include only on x86
 if(USE_UUID_V4)

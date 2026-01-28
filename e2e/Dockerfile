@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     libfuse-dev \
     libssl-dev \
     zlib1g-dev \
+    pkg-config \
     fuse3 \
     bc \
     && rm -rf /var/lib/apt/lists/*
