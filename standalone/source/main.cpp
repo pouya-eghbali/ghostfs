@@ -47,6 +47,7 @@ auto main(int argc, char** argv) -> int {
     ("C,read-ahead", "Read ahead cache size", cxxopts::value<uint8_t>()->default_value("8"))
     ("k,key", "TLS key", cxxopts::value<std::string>()->default_value(""))
     ("T,cert", "TLS cert", cxxopts::value<std::string>()->default_value(""))
+    ("tls", "Enable TLS using system trust store (for Let's Encrypt or public CAs)")
     ("A,authorize", "Run in authorizer mode")
     ("m,mount", "Soft mount a directory")
     ("M,mounts", "Get all soft mounts for user")
@@ -357,9 +358,11 @@ auto main(int argc, char** argv) -> int {
       std::cout << "Client-side encryption enabled" << std::endl;
     }
 
+    bool use_tls = result["tls"].as<bool>();
+
     char* mountpoint_arg = const_cast<char*>(mountpoint.c_str());
     return start_fs(argv[0], mountpoint_arg, fuse_options, host, port, user, token, write_back,
-                    read_ahead, cert);
+                    read_ahead, cert, use_tls);
 
   } else if (result["authorize"].as<bool>()) {
     uint16_t port = result["auth-port"].as<uint16_t>();

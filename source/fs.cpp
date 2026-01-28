@@ -129,6 +129,7 @@ struct ConnectionParams {
   std::string user;
   std::string token;
   std::string cert;
+  bool use_tls = false;
 };
 ConnectionParams g_conn_params;
 
@@ -148,10 +149,15 @@ struct ThreadLocalRpc {
     ioContext = std::make_unique<kj::AsyncIoContext>(kj::setupAsyncIo());
     auto &timer = ioContext->provider->getTimer();
 
-    if (g_conn_params.cert.length()) {
+    if (g_conn_params.cert.length() || g_conn_params.use_tls) {
       kj::TlsContext::Options options;
-      kj::TlsCertificate caCert(g_conn_params.cert);
-      options.trustedCertificates = kj::arrayPtr(&caCert, 1);
+      std::optional<kj::TlsCertificate> caCert;
+      if (g_conn_params.cert.length()) {
+        // Use explicit CA certificate
+        caCert.emplace(g_conn_params.cert);
+        options.trustedCertificates = kj::arrayPtr(&*caCert, 1);
+      }
+      // When no cert is provided (--tls without --cert), use system trust store (default)
 
       kj::TlsContext tls(kj::mv(options));
       auto network = tls.wrapNetwork(ioContext->provider->getNetwork());
@@ -2181,7 +2187,7 @@ void capnpErrorHandler(kj::Exception &e) {
 
 int start_fs(char *executable, char *argmnt, std::vector<std::string> options, std::string host,
              int port, std::string user, std::string token, uint8_t write_back_cache_size,
-             uint8_t read_ahead_cache_size, std::string cert_file) {
+             uint8_t read_ahead_cache_size, std::string cert_file, bool use_tls) {
   kj::_::Debug::setLogLevel(kj::_::Debug::Severity::INFO);
 
   // Set cache sizes from parameters (now thread-safe with mutex protection)
@@ -2196,6 +2202,7 @@ int start_fs(char *executable, char *argmnt, std::vector<std::string> options, s
   g_conn_params.user = user;
   g_conn_params.token = token;
   g_conn_params.cert = cert;
+  g_conn_params.use_tls = use_tls;
 
   // Verify credentials by doing initial authentication on main thread
   try {
