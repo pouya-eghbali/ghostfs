@@ -3,8 +3,10 @@
 
 #include <fuse_lowlevel.h>
 
-#include <map>
+#include <atomic>
+#include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 int start_fs(char* executable, char* argmnt, std::vector<std::string> options, std::string host,
@@ -14,9 +16,20 @@ int start_fs(char* executable, char* argmnt, std::vector<std::string> options, s
 int ghostfs_stat(fuse_ino_t ino, int64_t fh, struct stat* stbuf);
 int ghostfs_stat(fuse_ino_t ino, struct stat* stbuf);
 
-extern std::map<uint64_t, std::string> ino_to_path;
-extern std::map<std::string, uint64_t> path_to_ino;
-extern uint64_t current_ino;
+// Thread-safe inode map management
+extern std::unordered_map<uint64_t, std::string> ino_to_path;
+extern std::unordered_map<std::string, uint64_t> path_to_ino;
+extern std::atomic<uint64_t> current_ino;
+extern std::shared_mutex g_inode_mutex;
+
+// Thread-safe helper functions for inode management
+std::string get_path_for_ino(uint64_t ino);
+uint64_t get_ino_for_path(const std::string& path);
+uint64_t assign_inode(const std::string& path);
+bool has_inode(uint64_t ino);
+bool has_path(const std::string& path);
+void remove_inode(uint64_t ino);
+void update_inode_path(uint64_t ino, const std::string& old_path, const std::string& new_path);
 
 struct dirbuf {
   char* p;
