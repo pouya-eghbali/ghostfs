@@ -79,13 +79,16 @@
 #include <write.response.capnp.h>
 
 #include <filesystem>
-#include <map>
+#include <mutex>
 #include <set>
+#include <shared_mutex>
+#include <unordered_map>
 #include <vector>
 
 // Global file handle sets per user (shared across all connections for same user)
 // This allows multi-threaded FUSE clients to share file handles across connections
-std::map<std::string, std::set<int64_t>> user_fh_sets;
+std::unordered_map<std::string, std::set<int64_t>> user_fh_sets;
+std::shared_mutex g_fh_mutex;  // Protects user_fh_sets
 
 class GhostFSImpl final : public GhostFS::Server {
   std::string user;
@@ -96,10 +99,8 @@ class GhostFSImpl final : public GhostFS::Server {
     // ROOT
     if (ino == 1) {
       return normalize_path(root, user, suffix);
-    } else if (ino_to_path.contains(ino)) {
-      return ino_to_path[ino];
     }
-    return "";
+    return get_path_for_ino(ino);
   }
 
 public:
@@ -124,7 +125,7 @@ public:
       file_path = std::filesystem::path(root) / (*mounts)[name];
     } else {
       std::string user_root = normalize_path(root, user, suffix);
-      std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+      std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
       std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
       file_path = parent_path / std::filesystem::path(name);
     }
@@ -137,15 +138,7 @@ public:
       return kj::READY_NOW;
     }
 
-    uint64_t ino;
-
-    if (not path_to_ino.contains(file_path)) {
-      ino = ++current_ino;
-      ino_to_path[ino] = file_path;
-      path_to_ino[file_path] = ino;
-    } else {
-      ino = path_to_ino[file_path];
-    }
+    uint64_t ino = assign_inode(file_path.string());
 
     response.setIno(ino);
 
@@ -211,10 +204,13 @@ public:
 
     int64_t fh = req.getFi().getFh();
 
-    if (fh and not user_fh_sets[user].contains(fh)) {
-      response.setErrno(EACCES);
-      response.setRes(-1);
-      return kj::READY_NOW;
+    {
+      std::shared_lock lock(g_fh_mutex);
+      if (fh && !user_fh_sets[user].contains(fh)) {
+        response.setErrno(EACCES);
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
     }
 
     int res = ghostfs_stat(req.getIno(), fh, &attr);
@@ -286,15 +282,14 @@ public:
 
     int err = 0;
 
-    if (not ino_to_path.contains(ino)) {
+    std::string file_path = get_path_for_ino(ino);
+    if (file_path.empty()) {
       // Parent is unknown
       err = errno;
       response.setErrno(err);
       response.setRes(-1);
       return kj::READY_NOW;
     }
-
-    std::string file_path = ino_to_path[ino];
 
     Setattr::Attr::Reader attr = req.getAttr();
     Setattr::Attr::TimeSpec::Reader stAtime = attr.getStAtime();
@@ -398,7 +393,7 @@ public:
     uint64_t parent = req.getParent();
 
     std::string user_root = normalize_path(root, user, suffix);
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / req.getName().cStr();
 
@@ -410,24 +405,22 @@ public:
       return kj::READY_NOW;
     }
 
-    uint64_t file_ino;
-
-    file_ino = ++current_ino;
-    ino_to_path[file_ino] = file_path;
-    path_to_ino[file_path] = file_ino;
+    uint64_t file_ino = assign_inode(file_path.string());
 
     int fh = ::mknod(file_path.c_str(), req.getMode(), req.getRdev());
     int err = errno;
 
-    if (fh == -1) {      
-      ino_to_path.erase(file_ino);
-      path_to_ino.erase(file_path);
+    if (fh == -1) {
+      remove_inode(file_ino);
       
       response.setErrno(err);
       response.setRes(fh);
       return kj::READY_NOW;
     } else {
-      user_fh_sets[user].insert(fh);
+      {
+        std::unique_lock lock(g_fh_mutex);
+        user_fh_sets[user].insert(fh);
+      }
 
       response.setIno(file_ino);
 
@@ -438,7 +431,7 @@ public:
       //e.entry_timeout = 1.0;
 
       ghostfs_stat(file_ino, &attr);
-      
+
       MknodResponse::Attr::Builder attributes = response.initAttr();
 
       attributes.setStDev(attr.st_dev);
@@ -474,7 +467,7 @@ public:
     uint64_t parent = req.getParent();
 
     std::string user_root = normalize_path(root, user, suffix);
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / req.getName().cStr();
 
@@ -495,16 +488,15 @@ public:
       return kj::READY_NOW;
     }
     else {
-      user_fh_sets[user].insert(fh);
+      {
+        std::unique_lock lock(g_fh_mutex);
+        user_fh_sets[user].insert(fh);
+      }
 
       struct stat attr;
       memset(&attr, 0, sizeof(attr));
 
-      uint64_t file_ino;
-
-      file_ino = ++current_ino;
-      ino_to_path[file_ino] = file_path;
-      path_to_ino[file_path] = file_ino;
+      uint64_t file_ino = assign_inode(file_path.string());
 
       //e.attr_timeout = 1.0;
       //e.entry_timeout = 1.0;
@@ -549,7 +541,7 @@ public:
     std::string name = req.getName();
 
     std::string user_root = normalize_path(root, user, suffix);
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / std::filesystem::path(name);
 
@@ -584,7 +576,7 @@ public:
     // std::cout << "RMDIR name: " << name << std::endl;
 
     std::string user_root = normalize_path(root, user, suffix);
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / std::filesystem::path(name);
 
@@ -633,7 +625,8 @@ public:
 
     char buf[PATH_MAX];
 
-    int res = ::readlink(ino_to_path[req.getIno()].c_str(), buf, sizeof(buf) - 1);  // Decrease the buffer size by 1
+    std::string readlink_path = get_path_for_ino(req.getIno());
+    int res = ::readlink(readlink_path.c_str(), buf, sizeof(buf) - 1);  // Decrease the buffer size by 1
     int err = errno;
 
     if (res >= static_cast<int>(sizeof(buf) - 1)) {
@@ -674,7 +667,7 @@ public:
     // std::cout << "SYMLINK name: " << name << std::endl;
 
     std::string user_root = normalize_path(root, user, suffix);
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / std::filesystem::path(name);
 
@@ -709,15 +702,11 @@ public:
       struct stat attr;
       memset(&attr, 0, sizeof(attr));
 
-      uint64_t file_ino;
-
-      file_ino = ++current_ino;
-      ino_to_path[file_ino] = file_path;
-      path_to_ino[file_path] = file_ino;
+      uint64_t file_ino = assign_inode(file_path.string());
 
       //e.attr_timeout = 1.0;
       //e.entry_timeout = 1.0;
-      
+
       response.setIno(file_ino);
 
       ghostfs_stat(file_ino, &attr);
@@ -756,11 +745,11 @@ public:
 
     std::string user_root = normalize_path(root, user, suffix);
 
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / std::filesystem::path(name);
 
-    std::string newparent_path_name = newparent == 1 ? user_root : ino_to_path[newparent];
+    std::string newparent_path_name = newparent == 1 ? user_root : get_path_for_ino(newparent);
     std::filesystem::path newparent_path = std::filesystem::path(newparent_path_name);
     std::filesystem::path newfile_path = newparent_path / std::filesystem::path(newname);
 
@@ -784,11 +773,11 @@ public:
     int res = ::rename(file_path.c_str(), newfile_path.c_str());
     int err = errno;
 
-    // fix ino to path
-    int64_t ino = path_to_ino[file_path];
-    ino_to_path[ino] = newfile_path;
-    path_to_ino[newfile_path] = ino;
-    path_to_ino.erase(file_path);
+    // fix ino to path using thread-safe update
+    uint64_t ino = get_ino_for_path(file_path.string());
+    if (ino != 0) {
+      update_inode_path(ino, file_path.string(), newfile_path.string());
+    }
 
     // fix ino to path recursively if we rename a directory
     // Use symlink_status to check if it's actually a directory (not a symlink to one)
@@ -800,12 +789,10 @@ public:
         std::filesystem::path relative = std::filesystem::relative(new_name, newfile_path);
         std::filesystem::path old_name = file_path / relative;
 
-        // Check if old_name exists in path_to_ino before accessing to prevent auto-vivification
-        if (path_to_ino.contains(old_name)) {
-          int64_t ino = path_to_ino[old_name];
-          ino_to_path[ino] = new_name;
-          path_to_ino[new_name] = ino;
-          path_to_ino.erase(old_name);
+        // Check if old_name exists before accessing to prevent auto-vivification
+        uint64_t child_ino = get_ino_for_path(old_name.string());
+        if (child_ino != 0) {
+          update_inode_path(child_ino, old_name.string(), new_name.string());
         }
       }
     }
@@ -842,7 +829,8 @@ public:
       return kj::READY_NOW;
     }
 
-    if (not ino_to_path.contains(req.getIno())) {
+    std::string open_path = get_path_for_ino(req.getIno());
+    if (open_path.empty()) {
       // File is unknown
       response.setRes(-1);
       response.setErrno(ENOENT);
@@ -853,9 +841,9 @@ public:
 
     Open::FuseFileInfo::Reader fi = req.getFi();
 
-    int64_t fh = ::open(ino_to_path[req.getIno()].c_str(), fi.getFlags());
+    int64_t fh = ::open(open_path.c_str(), fi.getFlags());
 
-    // std::cout << "open fh: " << fh << ", path: " << path << std::endl; 
+    // std::cout << "open fh: " << fh << ", path: " << path << std::endl;
 
     int err = errno;
     response.setErrno(err);
@@ -866,7 +854,10 @@ public:
       return kj::READY_NOW;
     }
 
-    user_fh_sets[user].insert(fh);
+    {
+      std::unique_lock lock(g_fh_mutex);
+      user_fh_sets[user].insert(fh);
+    }
 
     OpenResponse::FuseFileInfo::Builder fi_response = response.initFi();
 
@@ -912,7 +903,7 @@ public:
       return kj::READY_NOW;
     }
 
-    if (not ino_to_path.contains(ino)) {
+    if (!has_inode(ino)) {
       // File is unknown
       response.setRes(-1);
       response.setErrno(ENOENT);
@@ -928,10 +919,13 @@ public:
 
     int64_t fh = fi.getFh();
 
-    if (fh and not user_fh_sets[user].contains(fh)) {
-      response.setErrno(EACCES);
-      response.setRes(-1);
-      return kj::READY_NOW;
+    {
+      std::shared_lock lock(g_fh_mutex);
+      if (fh && !user_fh_sets[user].contains(fh)) {
+        response.setErrno(EACCES);
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
     }
 
     ssize_t res = ::pread(fh, buf.data(), size, off);
@@ -971,10 +965,13 @@ public:
 
     int64_t fh = fi.getFh();
 
-    if (fh and not user_fh_sets[user].contains(fh)) {
-      response.setErrno(EACCES);
-      response.setRes(-1);
-      return kj::READY_NOW;
+    {
+      std::shared_lock lock(g_fh_mutex);
+      if (fh && !user_fh_sets[user].contains(fh)) {
+        response.setErrno(EACCES);
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
     }
 
     ssize_t written = ::pwrite(fi.getFh(), buf, req.getSize(), req.getOff());
@@ -1015,10 +1012,13 @@ public:
 
       int64_t fh = fi.getFh();
 
-      if (fh and not user_fh_sets[user].contains(fh)) {
-        response[i].setErrno(EACCES);
-        response[i].setRes(-1);
-        return kj::READY_NOW;
+      {
+        std::shared_lock lock(g_fh_mutex);
+        if (fh && !user_fh_sets[user].contains(fh)) {
+          response[i].setErrno(EACCES);
+          response[i].setRes(-1);
+          return kj::READY_NOW;
+        }
       }
 
       ssize_t written = ::pwrite(fi.getFh(), buf, req.getSize(), req.getOff());
@@ -1043,10 +1043,13 @@ public:
     Release::FuseFileInfo::Reader fi = req.getFi();
     int64_t fh = fi.getFh();
 
-    if (fh and not user_fh_sets[user].contains(fh)) {
-      response.setErrno(EACCES);
-      response.setRes(-1);
-      return kj::READY_NOW;
+    {
+      std::shared_lock lock(g_fh_mutex);
+      if (fh && !user_fh_sets[user].contains(fh)) {
+        response.setErrno(EACCES);
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
     }
 
     // std::cout << "releasing " << fh << std::endl;
@@ -1054,7 +1057,10 @@ public:
     int res = ::close(fh);
     int err = errno;
 
-    user_fh_sets[user].erase(fh);
+    {
+      std::unique_lock lock(g_fh_mutex);
+      user_fh_sets[user].erase(fh);
+    }
 
     response.setErrno(err);
     response.setRes(res);
@@ -1089,75 +1095,39 @@ public:
       return kj::READY_NOW;
     }  // END EXAMPLE
 
-    uint64_t length = 2;
+    // Single pass: collect entries into vector
+    std::vector<std::pair<std::string, uint64_t>> collected_entries;
+    collected_entries.reserve(64);  // Reasonable initial capacity
 
+    // Add . and ..
+    collected_entries.emplace_back(".", ino);
+    collected_entries.emplace_back("..", get_parent_ino(ino, path));
+
+    // Single directory iteration - collect all entries
     std::filesystem::directory_iterator iter(
-        path, std::filesystem::directory_options::skip_permission_denied);
-
-    for ([[maybe_unused]] const auto& entry : iter) {
-      length++;
-    }
-
-    if (ino == 1) {
-      for([[maybe_unused]] auto const& mount: *get_user_mounts(user)) {
-        length++;
-      }
-    }
-
-    ::capnp::List<ReaddirResponse::Entry>::Builder entries = response.initEntries(length);
-
-    entries[0].setName(".");
-    entries[0].setIno(ino);
-    entries[1].setName("..");
-    entries[1].setIno(get_parent_ino(ino, path));
-
-    uint64_t index = 2;
-
-    // TODO: Find out how we can reuse the iterator from previous step
-    iter = std::filesystem::directory_iterator(
         path, std::filesystem::directory_options::skip_permission_denied);
 
     for (const auto& entry : iter) {
       std::string file_path = entry.path();
       std::string file_name = std::filesystem::path(file_path).filename();
-
-      uint64_t file_ino;
-
-      if (not path_to_ino.contains(file_path)) {
-        file_ino = ++current_ino;
-        ino_to_path[file_ino] = file_path;
-        path_to_ino[file_path] = file_ino;
-      } else {
-        file_ino = path_to_ino[file_path];
-      }
-
-      entries[index].setName(file_name);
-      entries[index].setIno(file_ino);
-
-      index++;
+      uint64_t file_ino = assign_inode(file_path);
+      collected_entries.emplace_back(file_name, file_ino);
     }
 
+    // Add soft mounts for root
     if (ino == 1) {
-      for([[maybe_unused]] auto const& mount: *get_user_mounts(user)) {
-        std::string destination = mount.first;
-        std::string source = mount.second;
+      for (auto const& [dest, source] : *get_user_mounts(user)) {
         std::string file_path = std::filesystem::path(root) / source;
-
-        uint64_t file_ino;
-
-        if (not path_to_ino.contains(file_path)) {
-          file_ino = ++current_ino;
-          ino_to_path[file_ino] = file_path;
-          path_to_ino[file_path] = file_ino;
-        } else {
-          file_ino = path_to_ino[file_path];
-        }
-
-        entries[index].setName(destination);
-        entries[index].setIno(file_ino);
-
-        index++;
+        uint64_t file_ino = assign_inode(file_path);
+        collected_entries.emplace_back(dest, file_ino);
       }
+    }
+
+    // Build response from collected entries
+    ::capnp::List<ReaddirResponse::Entry>::Builder entries = response.initEntries(collected_entries.size());
+    for (size_t i = 0; i < collected_entries.size(); i++) {
+      entries[i].setName(collected_entries[i].first);
+      entries[i].setIno(collected_entries[i].second);
     }
 
     response.setErrno(0);
@@ -1238,10 +1208,10 @@ public:
       return kj::READY_NOW;
     }
 
-    if (not ino_to_path.contains(ino)) {
+    if (!has_inode(ino)) {
       response.setRes(-1);
       response.setErrno(ENOENT);
-      
+
       return kj::READY_NOW;
     }
 
@@ -1266,7 +1236,7 @@ public:
     uint64_t parent = req.getParent();
 
     std::string user_root = normalize_path(root, user, suffix);
-    std::string parent_path_name = parent == 1 ? user_root : ino_to_path[parent];
+    std::string parent_path_name = parent == 1 ? user_root : get_path_for_ino(parent);
     std::filesystem::path parent_path = std::filesystem::path(parent_path_name);
     std::filesystem::path file_path = parent_path / req.getName().cStr();
 
@@ -1293,16 +1263,15 @@ public:
       response.setErrno(err);
       return kj::READY_NOW;
     }
-    user_fh_sets[user].insert(fh);
+    {
+      std::unique_lock lock(g_fh_mutex);
+      user_fh_sets[user].insert(fh);
+    }
 
     struct stat attr;
     memset(&attr, 0, sizeof(attr));
 
-    uint64_t file_ino;
-
-    file_ino = ++current_ino;
-    ino_to_path[file_ino] = file_path;
-    path_to_ino[file_path] = file_ino;
+    uint64_t file_ino = assign_inode(file_path.string());
 
     // e.attr_timeout = 1.0;
     // e.entry_timeout = 1.0;
@@ -1361,14 +1330,17 @@ public:
 
     int64_t fh = fi.getFh();
 
-    if (fh and not user_fh_sets[user].contains(fh)) {
-      response.setErrno(EACCES);
-      response.setRes(-1);
-      return kj::READY_NOW;
+    {
+      std::shared_lock lock(g_fh_mutex);
+      if (fh && !user_fh_sets[user].contains(fh)) {
+        response.setErrno(EACCES);
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
     }
 
     // std::cout << "flushing dup(" << fh << ")" << std::endl;
-    
+
     int res = ::close(dup(fh));
     int err = errno;
 
@@ -1390,10 +1362,13 @@ public:
     int res;
     int64_t fh = fi.getFh();
 
-    if (fh and not user_fh_sets[user].contains(fh)) {
-      response.setErrno(EACCES);
-      response.setRes(-1);
-      return kj::READY_NOW;
+    {
+      std::shared_lock lock(g_fh_mutex);
+      if (fh && !user_fh_sets[user].contains(fh)) {
+        response.setErrno(EACCES);
+        response.setRes(-1);
+        return kj::READY_NOW;
+      }
     }
 
     #ifndef __APPLE__

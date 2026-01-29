@@ -8,6 +8,26 @@
 
 namespace ghostfs::crypto {
 
+// Thread-local EVP contexts for reuse (avoids allocation per operation)
+namespace {
+  thread_local EVP_CIPHER_CTX* tl_encrypt_ctx = nullptr;
+  thread_local EVP_CIPHER_CTX* tl_decrypt_ctx = nullptr;
+
+  EVP_CIPHER_CTX* get_encrypt_ctx() {
+    if (!tl_encrypt_ctx) {
+      tl_encrypt_ctx = EVP_CIPHER_CTX_new();
+    }
+    return tl_encrypt_ctx;
+  }
+
+  EVP_CIPHER_CTX* get_decrypt_ctx() {
+    if (!tl_decrypt_ctx) {
+      tl_decrypt_ctx = EVP_CIPHER_CTX_new();
+    }
+    return tl_decrypt_ctx;
+  }
+}  // anonymous namespace
+
   bool init() {
     // OpenSSL 1.1+ auto-initializes
     return true;
@@ -78,54 +98,53 @@ namespace ghostfs::crypto {
       return false;
     }
 
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    // Use thread-local context (reused instead of allocated per call)
+    EVP_CIPHER_CTX* ctx = get_encrypt_ctx();
     if (!ctx) {
       return false;
     }
 
-    bool success = false;
+    // Reset context for reuse
+    EVP_CIPHER_CTX_reset(ctx);
+
     uint8_t* ciphertext = ciphertext_out + NONCE_SIZE;
     int len = 0;
     int ciphertext_len = 0;
 
     // Initialize encryption
     if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Set IV length (12 bytes is default for GCM, but be explicit)
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, NONCE_SIZE, nullptr) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Set key and IV
     if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Encrypt plaintext
     if (EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, static_cast<int>(plaintext_len)) != 1) {
-      goto cleanup;
+      return false;
     }
     ciphertext_len = len;
 
     // Finalize encryption
     if (EVP_EncryptFinal_ex(ctx, ciphertext + len, &len) != 1) {
-      goto cleanup;
+      return false;
     }
     ciphertext_len += len;
 
     // Get the authentication tag (appended after ciphertext)
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_SIZE, ciphertext + ciphertext_len)
         != 1) {
-      goto cleanup;
+      return false;
     }
 
-    success = true;
-
-  cleanup:
-    EVP_CIPHER_CTX_free(ctx);
-    return success;
+    return true;
   }
 
   bool decrypt_block(const uint8_t* ciphertext, size_t ciphertext_len, const uint8_t* key,
@@ -139,55 +158,54 @@ namespace ghostfs::crypto {
     size_t encrypted_len = ciphertext_len - NONCE_SIZE - TAG_SIZE;
     const uint8_t* tag = ciphertext + ciphertext_len - TAG_SIZE;
 
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    // Use thread-local context (reused instead of allocated per call)
+    EVP_CIPHER_CTX* ctx = get_decrypt_ctx();
     if (!ctx) {
       return false;
     }
 
-    bool success = false;
+    // Reset context for reuse
+    EVP_CIPHER_CTX_reset(ctx);
+
     int len = 0;
     int total_len = 0;
 
     // Initialize decryption
     if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Set IV length
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, NONCE_SIZE, nullptr) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Set key and IV
     if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Decrypt ciphertext
     if (EVP_DecryptUpdate(ctx, plaintext_out, &len, encrypted_data, static_cast<int>(encrypted_len))
         != 1) {
-      goto cleanup;
+      return false;
     }
     total_len = len;
 
     // Set expected tag
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_SIZE, const_cast<uint8_t*>(tag)) != 1) {
-      goto cleanup;
+      return false;
     }
 
     // Finalize decryption and verify tag
     if (EVP_DecryptFinal_ex(ctx, plaintext_out + len, &len) != 1) {
       // Authentication failed
-      goto cleanup;
+      return false;
     }
     total_len += len;
 
     *plaintext_len = static_cast<size_t>(total_len);
-    success = true;
-
-  cleanup:
-    EVP_CIPHER_CTX_free(ctx);
-    return success;
+    return true;
   }
 
   void create_header(uint8_t* header_out) {

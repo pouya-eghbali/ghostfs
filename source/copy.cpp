@@ -52,15 +52,6 @@ namespace ghostfs {
     return path;
   }
 
-  // Read file content
-  static std::string read_file(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-      return "";
-    }
-    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-  }
-
   // Progress display
   static void display_progress(int64_t current, int64_t total, bool show_progress) {
     if (!show_progress || total == 0) return;

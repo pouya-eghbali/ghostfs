@@ -5,6 +5,7 @@
 #include <fuse_lowlevel.h>
 #include <ghostfs/crypto.h>
 #include <ghostfs/fs.h>
+#include <ghostfs/thread_pool.h>
 #include <ghostfs/uuid.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,10 +18,11 @@
 #include <future>
 #include <iostream>
 #include <iterator>
-#include <map>
 #include <optional>
+#include <shared_mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // Cap'n'Proto
@@ -90,7 +92,7 @@ constexpr size_t MAX_READ_AHEAD_BYTES = 16 * 1024 * 1024;
 struct cached_write {
   fuse_req_t req;
   fuse_ino_t ino;
-  char *buf;
+  std::unique_ptr<char[]> buf;
   size_t size;
   off_t off;
   struct fuse_file_info fi;  // Store copy, not pointer (stack memory invalid after write returns)
@@ -98,14 +100,14 @@ struct cached_write {
 
 struct cached_read {
   fuse_ino_t ino;
-  char *buf;
+  std::unique_ptr<char[]> buf;
   size_t size;
   off_t off;
   struct fuse_file_info *fi;
 };
 
-std::map<uint64_t, std::vector<cached_write>> write_back_cache;
-std::map<uint64_t, cached_read> read_ahead_cache;
+std::unordered_map<uint64_t, std::vector<cached_write>> write_back_cache;
+std::unordered_map<uint64_t, cached_read> read_ahead_cache;
 
 // Mutexes for thread-safe cache access
 std::mutex write_cache_mutex;
@@ -114,13 +116,87 @@ std::mutex read_cache_mutex;
 // Encryption state
 static bool g_encryption_enabled = false;
 static uint8_t g_encryption_key[ghostfs::crypto::KEY_SIZE];
-static std::map<uint64_t, ghostfs::crypto::FileContext> g_crypto_contexts;  // keyed by file handle
+static std::unordered_map<uint64_t, ghostfs::crypto::FileContext> g_crypto_contexts;  // keyed by file handle
 static std::mutex g_crypto_mutex;
 
-std::map<uint64_t, std::string> ino_to_path;
-std::map<std::string, uint64_t> path_to_ino;
+// Global thread pool for crypto operations (lazy-initialized)
+static ghostfs::ThreadPool& get_crypto_pool() {
+  static ghostfs::ThreadPool pool(std::thread::hardware_concurrency());
+  return pool;
+}
 
-uint64_t current_ino = 1;
+// Thread-safe inode mapping with bounded growth
+constexpr size_t MAX_INODE_CACHE_SIZE = 100000;
+constexpr size_t INODE_EVICT_BATCH = 10000;  // Evict 10% at a time
+std::unordered_map<uint64_t, std::string> ino_to_path;
+std::unordered_map<std::string, uint64_t> path_to_ino;
+std::atomic<uint64_t> current_ino{1};
+std::shared_mutex g_inode_mutex;
+static uint64_t min_valid_ino = 2;  // Track eviction boundary (skip root inode 1)
+
+// Thread-safe helper functions for inode management
+std::string get_path_for_ino(uint64_t ino) {
+  std::shared_lock lock(g_inode_mutex);
+  auto it = ino_to_path.find(ino);
+  return (it != ino_to_path.end()) ? it->second : "";
+}
+
+uint64_t get_ino_for_path(const std::string& path) {
+  std::shared_lock lock(g_inode_mutex);
+  auto it = path_to_ino.find(path);
+  return (it != path_to_ino.end()) ? it->second : 0;
+}
+
+uint64_t assign_inode(const std::string& path) {
+  std::unique_lock lock(g_inode_mutex);
+  auto it = path_to_ino.find(path);
+  if (it != path_to_ino.end()) return it->second;
+
+  // Evict old entries if at capacity (batch eviction for efficiency)
+  if (ino_to_path.size() >= MAX_INODE_CACHE_SIZE) {
+    uint64_t evict_threshold = min_valid_ino + INODE_EVICT_BATCH;
+    for (auto iter = ino_to_path.begin(); iter != ino_to_path.end(); ) {
+      if (iter->first > 1 && iter->first < evict_threshold) {  // Don't evict root inode
+        path_to_ino.erase(iter->second);
+        iter = ino_to_path.erase(iter);
+      } else {
+        ++iter;
+      }
+    }
+    min_valid_ino = evict_threshold;
+  }
+
+  uint64_t ino = ++current_ino;
+  ino_to_path[ino] = path;
+  path_to_ino[path] = ino;
+  return ino;
+}
+
+bool has_inode(uint64_t ino) {
+  std::shared_lock lock(g_inode_mutex);
+  return ino_to_path.contains(ino);
+}
+
+bool has_path(const std::string& path) {
+  std::shared_lock lock(g_inode_mutex);
+  return path_to_ino.contains(path);
+}
+
+void remove_inode(uint64_t ino) {
+  std::unique_lock lock(g_inode_mutex);
+  auto it = ino_to_path.find(ino);
+  if (it != ino_to_path.end()) {
+    path_to_ino.erase(it->second);
+    ino_to_path.erase(it);
+  }
+}
+
+void update_inode_path(uint64_t ino, const std::string& old_path, const std::string& new_path) {
+  std::unique_lock lock(g_inode_mutex);
+  ino_to_path[ino] = new_path;
+  path_to_ino[new_path] = ino;
+  path_to_ino.erase(old_path);
+}
 
 // Global connection parameters for thread-local client creation
 struct ConnectionParams {
@@ -261,7 +337,7 @@ uint64_t get_parent_ino(uint64_t ino, std::string path) {
   }
 
   std::filesystem::path parent_path = std::filesystem::path(path).parent_path();
-  uint64_t parent_ino = path_to_ino[parent_path];
+  uint64_t parent_ino = get_ino_for_path(parent_path.string());
 
   return parent_ino;
 }
@@ -342,17 +418,50 @@ int ghostfs_stat(fuse_ino_t ino, struct stat *stbuf) {
     return 0;
   }
 
-  if (not ino_to_path.contains(ino)) {
+  std::string path = get_path_for_ino(ino);
+  if (path.empty()) {
     // File is unknown
     return -1;
   }
 
-  int res = lstat(ino_to_path[ino].c_str(), stbuf);
+  int res = lstat(path.c_str(), stbuf);
   stbuf->st_ino = ino;
 
   return res;
 }
 
+// DirbufBuilder: Pre-allocating directory buffer builder with O(1) amortized growth
+class DirbufBuilder {
+  std::vector<char> buffer;
+  size_t used = 0;
+
+public:
+  explicit DirbufBuilder(size_t estimated_entries = 64) {
+    // Estimate ~128 bytes per entry (name + stat + padding)
+    buffer.reserve(estimated_entries * 128);
+  }
+
+  void add(fuse_req_t req, const char* name, fuse_ino_t ino) {
+    struct stat stbuf = {};
+    stbuf.st_ino = ino;
+
+    size_t entry_size = fuse_add_direntry(req, nullptr, 0, name, nullptr, 0);
+
+    // Grow by 2x if needed (amortized O(1))
+    if (used + entry_size > buffer.size()) {
+      buffer.resize(std::max(buffer.size() * 2, used + entry_size));
+    }
+
+    fuse_add_direntry(req, buffer.data() + used, buffer.size() - used,
+                      name, &stbuf, used + entry_size);
+    used += entry_size;
+  }
+
+  const char* data() const { return buffer.data(); }
+  size_t size() const { return used; }
+};
+
+// Legacy dirbuf_add for backwards compatibility (if needed elsewhere)
 void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_ino_t ino) {
   struct stat stbuf;
   size_t oldsize = b->size;
@@ -549,10 +658,6 @@ static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_
     auto result = waitWithTimeout(request.send(), timer, waitScope);
     auto response = result.getRes();
 
-    struct dirbuf b;
-
-    memset(&b, 0, sizeof(b));
-
     int res = response.getRes();
 
     if (res == -1) {
@@ -560,11 +665,14 @@ static void ghostfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_
       return;
     }
 
+    // Use DirbufBuilder with pre-allocation based on response size
+    DirbufBuilder b(response.getEntries().size());
+
     for (ReaddirResponse::Entry::Reader entry : response.getEntries()) {
-      dirbuf_add(req, &b, entry.getName().cStr(), entry.getIno());
+      b.add(req, entry.getName().cStr(), entry.getIno());
     }
 
-    reply_buf_limited(req, b.p, b.size, off, size);
+    reply_buf_limited(req, b.data(), b.size(), off, size);
   } catch (const kj::Exception &e) {
     std::cerr << "readdir error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
@@ -677,11 +785,12 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
 bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
   std::lock_guard<std::mutex> lock(read_cache_mutex);
 
-  if (not read_ahead_cache.contains(fh)) {
+  auto it = read_ahead_cache.find(fh);
+  if (it == read_ahead_cache.end()) {
     return false;
   }
 
-  cached_read cache = read_ahead_cache[fh];
+  const cached_read& cache = it->second;
 
   if (cache.off > off) {
     return false;
@@ -694,7 +803,7 @@ bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
     return false;
   }
 
-  fuse_reply_buf(req, cache.buf + (off - cache.off), size);
+  fuse_reply_buf(req, cache.buf.get() + (off - cache.off), size);
   return true;
 }
 
@@ -762,10 +871,11 @@ static void encrypted_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t of
     std::vector<size_t> block_lengths(num_blocks);
     std::atomic<bool> decryption_failed{false};
 
-    // Parallel decryption for multiple blocks
+    // Parallel decryption for multiple blocks using thread pool
     const size_t num_threads = std::min(num_blocks, (size_t)std::thread::hardware_concurrency());
 
     if (num_blocks >= 4 && num_threads > 1) {
+      auto& pool = get_crypto_pool();
       std::vector<std::future<void>> futures;
       futures.reserve(num_threads);
 
@@ -777,7 +887,7 @@ static void encrypted_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t of
         size_t thread_blocks = blocks_per_thread + (t < remaining_blocks ? 1 : 0);
         size_t thread_start = block_start;
 
-        futures.push_back(std::async(std::launch::async, [&, thread_start, thread_blocks]() {
+        futures.push_back(pool.enqueue([&, thread_start, thread_blocks]() {
           for (size_t i = 0; i < thread_blocks && !decryption_failed; i++) {
             size_t block_idx = thread_start + i;
             size_t block_enc_offset = block_idx * ENCRYPTED_BLOCK_SIZE;
@@ -870,7 +980,32 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
     auto &waitScope = rpc.ioContext->waitScope;
     auto &timer = rpc.getTimer();
 
-    // Check if we need to write the header first (file doesn't have one yet)
+    // Calculate block range first (needed for combined read optimization)
+    size_t first_block = get_block_number(off);
+    size_t first_block_offset = get_offset_in_block(off);
+    size_t last_byte = off + size - 1;
+    size_t last_block = get_block_number(last_byte);
+    size_t last_block_end = get_offset_in_block(last_byte) + 1;  // exclusive
+    size_t total_blocks = last_block - first_block + 1;
+
+    // Determine which blocks need RMW (partial blocks)
+    bool first_partial = (first_block_offset > 0);
+    bool last_partial
+        = (last_block_end < BLOCK_SIZE) && (last_block != first_block || !first_partial);
+    // Special case: single partial block
+    if (first_block == last_block && (first_block_offset > 0 || last_block_end < BLOCK_SIZE)) {
+      first_partial = true;
+      last_partial = false;
+    }
+
+    // Allocate plaintext buffer for all blocks
+    std::vector<uint8_t> plaintext_buf(total_blocks * BLOCK_SIZE, 0);
+    std::vector<size_t> plaintext_lens(total_blocks, BLOCK_SIZE);
+
+    // Track if we already read the first partial block (via combined read)
+    bool first_partial_already_read = false;
+
+    // Check if we need to handle the header (file doesn't have one yet)
     {
       std::lock_guard<std::mutex> lock(g_crypto_mutex);
       auto it = g_crypto_contexts.find(fi->fh);
@@ -918,25 +1053,71 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
 
             std::memcpy(it->second.file_id, header + 2, FILE_ID_SIZE);
           } else {
-            // Append to existing file - try to read header now
-            auto headerRequest = rpc.client->readRequest();
-            Read::Builder headerRead = headerRequest.getReq();
-            Read::FuseFileInfo::Builder headerFi = headerRead.initFi();
+            // Append to existing file - read header
+            // Optimization: combine header read with first partial block read when possible
+            // This saves one RPC round-trip
+            if (first_partial && first_block == 0) {
+              // Combined read: header (18 bytes) + first encrypted block (up to 4124 bytes)
+              size_t combined_size = HEADER_SIZE + ENCRYPTED_BLOCK_SIZE;
 
-            headerRead.setIno(ino);
-            headerRead.setSize(HEADER_SIZE);
-            headerRead.setOff(0);
-            fillFileInfo(&headerFi, &fi_no_append);
+              auto combinedRequest = rpc.client->readRequest();
+              Read::Builder combinedRead = combinedRequest.getReq();
+              Read::FuseFileInfo::Builder combinedFi = combinedRead.initFi();
 
-            auto headerResult = waitWithTimeout(headerRequest.send(), timer, waitScope);
-            auto headerResponse = headerResult.getRes();
+              combinedRead.setIno(ino);
+              combinedRead.setSize(combined_size);
+              combinedRead.setOff(0);
+              fillFileInfo(&combinedFi, &fi_no_append);
 
-            if (headerResponse.getRes() >= static_cast<int>(HEADER_SIZE)) {
-              capnp::Data::Reader headerBuf = headerResponse.getBuf();
-              const uint8_t *headerData = headerBuf.asBytes().begin();
-              uint16_t version;
-              if (parse_header(headerData, HEADER_SIZE, it->second.file_id, &version)) {
-                it->second.is_encrypted = true;
+              auto combinedResult = waitWithTimeout(combinedRequest.send(), timer, waitScope);
+              auto combinedResponse = combinedResult.getRes();
+
+              if (combinedResponse.getRes() >= static_cast<int>(HEADER_SIZE)) {
+                capnp::Data::Reader combinedBuf = combinedResponse.getBuf();
+                const uint8_t *data = combinedBuf.asBytes().begin();
+                size_t data_len = static_cast<size_t>(combinedResponse.getRes());
+
+                // Parse header from first 18 bytes
+                uint16_t version;
+                if (parse_header(data, HEADER_SIZE, it->second.file_id, &version)) {
+                  it->second.is_encrypted = true;
+                }
+
+                // Decrypt first partial block if we got enough data
+                if (data_len > HEADER_SIZE) {
+                  const uint8_t *block_data = data + HEADER_SIZE;
+                  size_t block_len = data_len - HEADER_SIZE;
+                  if (block_len >= NONCE_SIZE + TAG_SIZE) {
+                    size_t dec_len;
+                    if (decrypt_block(block_data, block_len, g_encryption_key,
+                                      plaintext_buf.data(), &dec_len)) {
+                      plaintext_lens[0] = dec_len;
+                      first_partial_already_read = true;
+                    }
+                  }
+                }
+              }
+            } else {
+              // Just read header (partial blocks will be read separately)
+              auto headerRequest = rpc.client->readRequest();
+              Read::Builder headerRead = headerRequest.getReq();
+              Read::FuseFileInfo::Builder headerFi = headerRead.initFi();
+
+              headerRead.setIno(ino);
+              headerRead.setSize(HEADER_SIZE);
+              headerRead.setOff(0);
+              fillFileInfo(&headerFi, &fi_no_append);
+
+              auto headerResult = waitWithTimeout(headerRequest.send(), timer, waitScope);
+              auto headerResponse = headerResult.getRes();
+
+              if (headerResponse.getRes() >= static_cast<int>(HEADER_SIZE)) {
+                capnp::Data::Reader headerBuf = headerResponse.getBuf();
+                const uint8_t *headerData = headerBuf.asBytes().begin();
+                uint16_t version;
+                if (parse_header(headerData, HEADER_SIZE, it->second.file_id, &version)) {
+                  it->second.is_encrypted = true;
+                }
               }
             }
           }
@@ -946,33 +1127,12 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
 
     const uint8_t *input = reinterpret_cast<const uint8_t *>(buf);
 
-    // Calculate block range
-    size_t first_block = get_block_number(off);
-    size_t first_block_offset = get_offset_in_block(off);
-    size_t last_byte = off + size - 1;
-    size_t last_block = get_block_number(last_byte);
-    size_t last_block_end = get_offset_in_block(last_byte) + 1;  // exclusive
-    size_t total_blocks = last_block - first_block + 1;
-
-    // Determine which blocks need RMW (partial blocks)
-    bool first_partial = (first_block_offset > 0);
-    bool last_partial
-        = (last_block_end < BLOCK_SIZE) && (last_block != first_block || !first_partial);
-    // Special case: single partial block
-    if (first_block == last_block && (first_block_offset > 0 || last_block_end < BLOCK_SIZE)) {
-      first_partial = true;
-      last_partial = false;
-    }
-
-    // Allocate plaintext buffer for all blocks
-    std::vector<uint8_t> plaintext_buf(total_blocks * BLOCK_SIZE, 0);
-    std::vector<size_t> plaintext_lens(total_blocks, BLOCK_SIZE);
-
-    // STEP 1: Read partial blocks that need RMW (single RPC for both if needed)
-    if (first_partial || last_partial) {
-      // Determine what to read: just first, just last, or both
-      size_t read_first = first_partial ? first_block : last_block;
-      size_t read_last = last_partial ? last_block : first_block;
+    // STEP 1: Read partial blocks that need RMW (skip first if already read via combined read)
+    bool need_first_read = first_partial && !first_partial_already_read;
+    if (need_first_read || last_partial) {
+      // Determine what to read
+      size_t read_first = need_first_read ? first_block : last_block;
+      size_t read_last = last_partial ? last_block : (need_first_read ? first_block : last_block);
       size_t blocks_to_read = read_last - read_first + 1;
 
       int64_t read_start = HEADER_SIZE + read_first * ENCRYPTED_BLOCK_SIZE;
@@ -995,8 +1155,8 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
         const uint8_t *enc_data = blockBuf.asBytes().begin();
         size_t enc_len = static_cast<size_t>(readResponse.getRes());
 
-        // Decrypt first partial block if needed
-        if (first_partial && enc_len >= NONCE_SIZE + TAG_SIZE) {
+        // Decrypt first partial block if needed and not already read
+        if (need_first_read && enc_len >= NONCE_SIZE + TAG_SIZE) {
           size_t block_enc_size = (std::min)(ENCRYPTED_BLOCK_SIZE, enc_len);
           size_t dec_len;
           if (decrypt_block(enc_data, block_enc_size, g_encryption_key, plaintext_buf.data(),
@@ -1041,12 +1201,13 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
       }
     }
 
-    // STEP 3: Encrypt all blocks (parallel for large batches)
+    // STEP 3: Encrypt all blocks (parallel for large batches using thread pool)
     std::vector<uint8_t> encrypted_buf(total_blocks * ENCRYPTED_BLOCK_SIZE);
     std::atomic<bool> encryption_failed{false};
 
     const size_t num_threads = std::min(total_blocks, (size_t)std::thread::hardware_concurrency());
     if (total_blocks >= 4 && num_threads > 1) {
+      auto& pool = get_crypto_pool();
       std::vector<std::future<void>> futures;
       size_t blocks_per_thread = total_blocks / num_threads;
       size_t extra = total_blocks % num_threads;
@@ -1054,7 +1215,7 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
 
       for (size_t t = 0; t < num_threads; t++) {
         size_t count = blocks_per_thread + (t < extra ? 1 : 0);
-        futures.push_back(std::async(std::launch::async, [&, start, count]() {
+        futures.push_back(pool.enqueue([&, start, count]() {
           for (size_t i = 0; i < count && !encryption_failed; i++) {
             size_t idx = start + i;
             if (!encrypt_block(plaintext_buf.data() + idx * BLOCK_SIZE, plaintext_lens[idx],
@@ -1155,13 +1316,10 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
     if (static_cast<size_t>(res) > size) {
       std::lock_guard<std::mutex> lock(read_cache_mutex);
 
-      if (read_ahead_cache.contains(fi->fh)) {
-        free(read_ahead_cache[fi->fh].buf);
-      }
-
-      cached_read cache = {ino, (char *)malloc(res), static_cast<size_t>(res), off, fi};
-      memcpy(cache.buf, buf, res);
-      read_ahead_cache[fi->fh] = cache;
+      // Old entry is automatically freed when replaced (unique_ptr)
+      auto buf_ptr = std::make_unique<char[]>(res);
+      memcpy(buf_ptr.get(), buf, res);
+      read_ahead_cache[fi->fh] = cached_read{ino, std::move(buf_ptr), static_cast<size_t>(res), off, fi};
     }
   } catch (const kj::Exception &e) {
     std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
@@ -1245,14 +1403,14 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
   }
 }
 
-uint64_t add_to_write_back_cache(cached_write cache) {
+uint64_t add_to_write_back_cache(cached_write&& cache) {
   std::lock_guard<std::mutex> lock(write_cache_mutex);
 
   if (not write_back_cache.contains(cache.fi.fh)) {
     write_back_cache[cache.fi.fh] = std::vector<cached_write>();
   }
 
-  write_back_cache[cache.fi.fh].push_back(cache);
+  write_back_cache[cache.fi.fh].push_back(std::move(cache));
   return write_back_cache[cache.fi.fh].size();
 }
 
@@ -1291,7 +1449,7 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
       write[i].setOff(cache.off);
       write[i].setSize(cache.size);
 
-      kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)cache.buf, cache.size);
+      kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)cache.buf.get(), cache.size);
       capnp::Data::Reader buf_reader(buf_ptr);
       write[i].setBuf(buf_reader);
 
@@ -1320,10 +1478,7 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
       fuse_reply_err(entries_to_flush[cached - 1].req, ETIMEDOUT);
     }
   }
-
-  for (auto &cache : entries_to_flush) {
-    free(cache.buf);
-  }
+  // unique_ptr automatically frees buffers when entries_to_flush goes out of scope
 }
 
 /**
@@ -1360,15 +1515,20 @@ static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, si
   if (max_read_ahead_cache > 0) {
     std::lock_guard<std::mutex> lock(read_cache_mutex);
     if (read_ahead_cache.contains(fi->fh)) {
-      free(read_ahead_cache[fi->fh].buf);
-      read_ahead_cache.erase(fi->fh);
+      read_ahead_cache.erase(fi->fh);  // unique_ptr auto-frees
     }
   }
 
   if (max_write_back_cache > 0) {
-    cached_write cache = {req, ino, (char *)malloc(size), size, off, *fi};  // Copy fi, not pointer
-    memcpy(cache.buf, buf, size);
-    uint64_t cached = add_to_write_back_cache(cache);
+    cached_write cache;
+    cache.req = req;
+    cache.ino = ino;
+    cache.buf = std::make_unique<char[]>(size);
+    cache.size = size;
+    cache.off = off;
+    cache.fi = *fi;  // Copy fi, not pointer
+    memcpy(cache.buf.get(), buf, size);
+    uint64_t cached = add_to_write_back_cache(std::move(cache));
 
     if (cached >= max_write_back_cache) {
       flush_write_back_cache(fi->fh, true);
