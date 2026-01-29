@@ -210,6 +210,18 @@ namespace ghostfs {
     return data;
   }
 
+  // Drop kernel page cache to ensure cold reads (Linux only)
+  void drop_caches() {
+#ifdef __linux__
+    sync();
+    std::ofstream drop("/proc/sys/vm/drop_caches");
+    if (drop) {
+      drop << "3";
+      drop.close();
+    }
+#endif
+  }
+
   // ============================================================================
   // Benchmark Implementation
   // ============================================================================
@@ -294,6 +306,12 @@ namespace ghostfs {
   int run_benchmark(const BenchmarkConfig& config) {
     BenchmarkResults results;
 
+    if (config.write_only && config.read_only) {
+      std::cerr << term::red("Error:") << " Cannot specify both --write-only and --read-only"
+                << std::endl;
+      return 1;
+    }
+
     if (!fs::exists(config.dir)) {
       std::cerr << term::red("Error:") << " Directory does not exist: " << config.dir << std::endl;
       return 1;
@@ -312,11 +330,17 @@ namespace ghostfs {
     std::string bench_dir = config.dir + "/ghostfs-bench";
 
     fs::create_directories(tmp_small);
-    fs::create_directories(bench_dir);
+    if (!config.read_only) {
+      fs::create_directories(bench_dir);
+    }
 
+    // For write_only: keep bench_dir for subsequent read_only run
+    // For read_only: assume bench_dir already exists from write_only run
     auto cleanup = [&]() {
       fs::remove_all(tmp_base);
-      fs::remove_all(bench_dir);
+      if (!config.write_only) {
+        fs::remove_all(bench_dir);
+      }
     };
 
     Timer timer;
@@ -352,7 +376,7 @@ namespace ghostfs {
     std::cout << std::endl;
 
     // Step 2: Small files write
-    {
+    if (!config.read_only) {
       Spinner spinner("Small files: writing");
       spinner.start();
 
@@ -390,12 +414,23 @@ namespace ghostfs {
       spinner.stop_with_result(fmt::format("{:.1f} files/s", results.small_write_fps));
     }
 
+    // Run pre-read command if specified (e.g., restart MinIO to clear S3 cache)
+    if (!config.write_only && !config.pre_read_cmd.empty()) {
+      Spinner spinner("Running pre-read command");
+      spinner.start();
+      int ret = std::system(config.pre_read_cmd.c_str());
+      spinner.stop(ret == 0);
+    }
+
     // Step 3: Small files read
-    {
+    if (!config.write_only) {
       Spinner spinner("Small files: reading");
       spinner.start();
 
       std::string bench_small = bench_dir + "/small";
+
+      // Drop kernel page cache for cold read test
+      drop_caches();
 
       timer.start();
 
@@ -425,7 +460,7 @@ namespace ghostfs {
     }
 
     // Step 4: Large file write
-    {
+    if (!config.read_only) {
       Spinner spinner("Large file: writing");
       spinner.start();
 
@@ -459,17 +494,21 @@ namespace ghostfs {
     }
 
     // Step 5: Large file read
-    {
+    if (!config.write_only) {
       Spinner spinner("Large file: reading");
       spinner.start();
 
       std::string path = bench_dir + "/large.bin";
 
+      // Drop kernel page cache for cold read test
+      drop_caches();
+
       timer.start();
 
       std::ifstream file(path, std::ios::binary);
 
-      constexpr size_t buffer_size = 1024 * 1024;
+      // Use 8MB buffer to match FUSE max_read for fewer RPC round trips
+      constexpr size_t buffer_size = 8 * 1024 * 1024;
       std::vector<char> buffer(buffer_size);
 
       while (file.read(buffer.data(), static_cast<std::streamsize>(buffer_size))
@@ -484,8 +523,8 @@ namespace ghostfs {
       spinner.stop_with_result(fmt::format("{:.1f} MB/s", results.large_read_mbps));
     }
 
-    // Step 6: Verify integrity
-    if (config.verify) {
+    // Step 6: Verify integrity (skip in write_only mode since we didn't read)
+    if (config.verify && !config.write_only) {
       Spinner spinner("Verifying data integrity");
       spinner.start();
 

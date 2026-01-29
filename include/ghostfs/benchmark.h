@@ -12,6 +12,9 @@ namespace ghostfs {
     uint32_t large_file_size_mb = 1000;  // Size of large file (MB)
     uint8_t parallel_jobs = 8;           // Parallel jobs for small files
     bool verify = true;                  // Verify data integrity
+    std::string pre_read_cmd;            // Shell command to run before read tests (e.g., restart cache)
+    bool write_only = false;             // Only run write tests (skip reads, keep data)
+    bool read_only = false;              // Only run read tests (assume data exists)
   };
 
   struct BenchmarkResults {
@@ -33,11 +36,5 @@ namespace ghostfs {
 
   // Run the benchmark suite
   int run_benchmark(const BenchmarkConfig& config);
-
-  void NewFunction();
-
-  void NewFunction();
-
-  void NewFunction();
 
 }  // namespace ghostfs

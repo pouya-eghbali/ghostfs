@@ -100,10 +100,13 @@ struct cached_write {
 
 struct cached_read {
   fuse_ino_t ino;
-  std::unique_ptr<char[]> buf;
+  std::unique_ptr<char[]> buf;  // Owned buffer (fallback if response can't be kept)
+  const char *data_ptr;         // Pointer to actual data (either in buf or response)
   size_t size;
   off_t off;
-  struct fuse_file_info *fi;
+  uint64_t fh;
+  // Keep Cap'n Proto response alive to avoid copy (zero-copy caching)
+  std::optional<capnp::Response<GhostFS::ReadResults>> response;
 };
 
 std::unordered_map<uint64_t, std::vector<cached_write>> write_back_cache;
@@ -804,7 +807,8 @@ bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
     return false;
   }
 
-  fuse_reply_buf(req, cache.buf.get() + (off - cache.off), size);
+  // Use data_ptr which points to either the zero-copy response buffer or owned buf
+  fuse_reply_buf(req, cache.data_ptr + (off - cache.off), size);
   return true;
 }
 
@@ -1317,11 +1321,18 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
     if (static_cast<size_t>(res) > size) {
       std::lock_guard<std::mutex> lock(read_cache_mutex);
 
-      // Old entry is automatically freed when replaced (unique_ptr)
-      auto buf_ptr = std::make_unique<char[]>(res);
-      memcpy(buf_ptr.get(), buf, res);
-      read_ahead_cache[fi->fh]
-          = cached_read{ino, std::move(buf_ptr), static_cast<size_t>(res), off, fi};
+      // Zero-copy: keep the Cap'n Proto response alive instead of copying
+      // The response owns the buffer, so as long as it's alive, buf is valid
+      cached_read cache;
+      cache.ino = ino;
+      cache.data_ptr = buf;
+      cache.size = static_cast<size_t>(res);
+      cache.off = off;
+      cache.fh = fi->fh;
+      cache.response = std::move(result);  // Move response to keep buffer alive
+      cache.buf = nullptr;                 // Not using owned buffer
+
+      read_ahead_cache[fi->fh] = std::move(cache);
     }
   } catch (const kj::Exception &e) {
     std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
@@ -1359,6 +1370,7 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
     return;
   }
 
+  // Legacy read-ahead cache (disabled when max_read_ahead_cache == 0)
   if (max_read_ahead_cache > 0) {
     bool is_cached = reply_from_cache(req, fi->fh, size, off);
 
@@ -1369,6 +1381,7 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
     return;
   }
 
+  // Direct read - single RPC call (FUSE kernel handles read-ahead via max_readahead option)
   try {
     auto &rpc = getRpc();
     auto &waitScope = rpc.ioContext->waitScope;
@@ -1396,9 +1409,8 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
 
     capnp::Data::Reader buf_reader = response.getBuf();
     const auto chars = buf_reader.asChars();
-    const char *buf = chars.begin();
+    fuse_reply_buf(req, chars.begin(), res);
 
-    fuse_reply_buf(req, buf, res);
   } catch (const kj::Exception &e) {
     std::cerr << "read error: " << e.getDescription().cStr() << std::endl;
     fuse_reply_err(req, ETIMEDOUT);
@@ -2306,10 +2318,37 @@ static void ghostfs_ll_readlink(fuse_req_t req, fuse_ino_t ino) {
   }
 }
 
+// FUSE init - set capabilities for better performance
+static void ghostfs_ll_init(void *userdata, struct fuse_conn_info *conn) {
+  (void)userdata;
+
+  // Request async reads for better pipelining (kernel issues multiple reads concurrently)
+  if (conn->capable & FUSE_CAP_ASYNC_READ) {
+    conn->want |= FUSE_CAP_ASYNC_READ;
+  }
+
+  // Enable big writes (single writes larger than 4KB)
+  if (conn->capable & FUSE_CAP_BIG_WRITES) {
+    conn->want |= FUSE_CAP_BIG_WRITES;
+  }
+
+  // Note: We do NOT modify conn->max_write or conn->max_readahead here.
+  // Setting these values causes "Invalid argument" errors in some Docker
+  // environments. Use mount options (-o max_read=N, -o max_readahead=N)
+  // to request larger buffers, which works in environments where FUSE
+  // properly supports those values.
+
+  // Note: FUSE_CAP_SPLICE_* capabilities are NOT explicitly requested.
+  // Per libfuse docs, splice is enabled by default when supported by the
+  // kernel AND the filesystem implements write_buf()/read_buf() handlers.
+  // Since we don't implement those handlers, splice won't be used.
+}
+
 // clang-format off
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 static const struct fuse_lowlevel_ops ghostfs_ll_oper = {
+    .init = ghostfs_ll_init,
     .lookup = ghostfs_ll_lookup,
     .getattr = ghostfs_ll_getattr,
     .setattr = ghostfs_ll_setattr,
