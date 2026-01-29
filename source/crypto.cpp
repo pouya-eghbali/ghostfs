@@ -8,25 +8,25 @@
 
 namespace ghostfs::crypto {
 
-// Thread-local EVP contexts for reuse (avoids allocation per operation)
-namespace {
-  thread_local EVP_CIPHER_CTX* tl_encrypt_ctx = nullptr;
-  thread_local EVP_CIPHER_CTX* tl_decrypt_ctx = nullptr;
+  // Thread-local EVP contexts for reuse (avoids allocation per operation)
+  namespace {
+    thread_local EVP_CIPHER_CTX* tl_encrypt_ctx = nullptr;
+    thread_local EVP_CIPHER_CTX* tl_decrypt_ctx = nullptr;
 
-  EVP_CIPHER_CTX* get_encrypt_ctx() {
-    if (!tl_encrypt_ctx) {
-      tl_encrypt_ctx = EVP_CIPHER_CTX_new();
+    EVP_CIPHER_CTX* get_encrypt_ctx() {
+      if (!tl_encrypt_ctx) {
+        tl_encrypt_ctx = EVP_CIPHER_CTX_new();
+      }
+      return tl_encrypt_ctx;
     }
-    return tl_encrypt_ctx;
-  }
 
-  EVP_CIPHER_CTX* get_decrypt_ctx() {
-    if (!tl_decrypt_ctx) {
-      tl_decrypt_ctx = EVP_CIPHER_CTX_new();
+    EVP_CIPHER_CTX* get_decrypt_ctx() {
+      if (!tl_decrypt_ctx) {
+        tl_decrypt_ctx = EVP_CIPHER_CTX_new();
+      }
+      return tl_decrypt_ctx;
     }
-    return tl_decrypt_ctx;
-  }
-}  // anonymous namespace
+  }  // anonymous namespace
 
   bool init() {
     // OpenSSL 1.1+ auto-initializes

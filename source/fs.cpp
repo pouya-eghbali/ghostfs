@@ -116,11 +116,12 @@ std::mutex read_cache_mutex;
 // Encryption state
 static bool g_encryption_enabled = false;
 static uint8_t g_encryption_key[ghostfs::crypto::KEY_SIZE];
-static std::unordered_map<uint64_t, ghostfs::crypto::FileContext> g_crypto_contexts;  // keyed by file handle
+static std::unordered_map<uint64_t, ghostfs::crypto::FileContext>
+    g_crypto_contexts;  // keyed by file handle
 static std::mutex g_crypto_mutex;
 
 // Global thread pool for crypto operations (lazy-initialized)
-static ghostfs::ThreadPool& get_crypto_pool() {
+static ghostfs::ThreadPool &get_crypto_pool() {
   static ghostfs::ThreadPool pool(std::thread::hardware_concurrency());
   return pool;
 }
@@ -141,13 +142,13 @@ std::string get_path_for_ino(uint64_t ino) {
   return (it != ino_to_path.end()) ? it->second : "";
 }
 
-uint64_t get_ino_for_path(const std::string& path) {
+uint64_t get_ino_for_path(const std::string &path) {
   std::shared_lock lock(g_inode_mutex);
   auto it = path_to_ino.find(path);
   return (it != path_to_ino.end()) ? it->second : 0;
 }
 
-uint64_t assign_inode(const std::string& path) {
+uint64_t assign_inode(const std::string &path) {
   std::unique_lock lock(g_inode_mutex);
   auto it = path_to_ino.find(path);
   if (it != path_to_ino.end()) return it->second;
@@ -155,7 +156,7 @@ uint64_t assign_inode(const std::string& path) {
   // Evict old entries if at capacity (batch eviction for efficiency)
   if (ino_to_path.size() >= MAX_INODE_CACHE_SIZE) {
     uint64_t evict_threshold = min_valid_ino + INODE_EVICT_BATCH;
-    for (auto iter = ino_to_path.begin(); iter != ino_to_path.end(); ) {
+    for (auto iter = ino_to_path.begin(); iter != ino_to_path.end();) {
       if (iter->first > 1 && iter->first < evict_threshold) {  // Don't evict root inode
         path_to_ino.erase(iter->second);
         iter = ino_to_path.erase(iter);
@@ -177,7 +178,7 @@ bool has_inode(uint64_t ino) {
   return ino_to_path.contains(ino);
 }
 
-bool has_path(const std::string& path) {
+bool has_path(const std::string &path) {
   std::shared_lock lock(g_inode_mutex);
   return path_to_ino.contains(path);
 }
@@ -191,7 +192,7 @@ void remove_inode(uint64_t ino) {
   }
 }
 
-void update_inode_path(uint64_t ino, const std::string& old_path, const std::string& new_path) {
+void update_inode_path(uint64_t ino, const std::string &old_path, const std::string &new_path) {
   std::unique_lock lock(g_inode_mutex);
   ino_to_path[ino] = new_path;
   path_to_ino[new_path] = ino;
@@ -441,7 +442,7 @@ public:
     buffer.reserve(estimated_entries * 128);
   }
 
-  void add(fuse_req_t req, const char* name, fuse_ino_t ino) {
+  void add(fuse_req_t req, const char *name, fuse_ino_t ino) {
     struct stat stbuf = {};
     stbuf.st_ino = ino;
 
@@ -452,12 +453,12 @@ public:
       buffer.resize(std::max(buffer.size() * 2, used + entry_size));
     }
 
-    fuse_add_direntry(req, buffer.data() + used, buffer.size() - used,
-                      name, &stbuf, used + entry_size);
+    fuse_add_direntry(req, buffer.data() + used, buffer.size() - used, name, &stbuf,
+                      used + entry_size);
     used += entry_size;
   }
 
-  const char* data() const { return buffer.data(); }
+  const char *data() const { return buffer.data(); }
   size_t size() const { return used; }
 };
 
@@ -790,7 +791,7 @@ bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
     return false;
   }
 
-  const cached_read& cache = it->second;
+  const cached_read &cache = it->second;
 
   if (cache.off > off) {
     return false;
@@ -875,7 +876,7 @@ static void encrypted_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t of
     const size_t num_threads = std::min(num_blocks, (size_t)std::thread::hardware_concurrency());
 
     if (num_blocks >= 4 && num_threads > 1) {
-      auto& pool = get_crypto_pool();
+      auto &pool = get_crypto_pool();
       std::vector<std::future<void>> futures;
       futures.reserve(num_threads);
 
@@ -1089,8 +1090,8 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
                   size_t block_len = data_len - HEADER_SIZE;
                   if (block_len >= NONCE_SIZE + TAG_SIZE) {
                     size_t dec_len;
-                    if (decrypt_block(block_data, block_len, g_encryption_key,
-                                      plaintext_buf.data(), &dec_len)) {
+                    if (decrypt_block(block_data, block_len, g_encryption_key, plaintext_buf.data(),
+                                      &dec_len)) {
                       plaintext_lens[0] = dec_len;
                       first_partial_already_read = true;
                     }
@@ -1207,7 +1208,7 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
 
     const size_t num_threads = std::min(total_blocks, (size_t)std::thread::hardware_concurrency());
     if (total_blocks >= 4 && num_threads > 1) {
-      auto& pool = get_crypto_pool();
+      auto &pool = get_crypto_pool();
       std::vector<std::future<void>> futures;
       size_t blocks_per_thread = total_blocks / num_threads;
       size_t extra = total_blocks % num_threads;
@@ -1319,7 +1320,8 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
       // Old entry is automatically freed when replaced (unique_ptr)
       auto buf_ptr = std::make_unique<char[]>(res);
       memcpy(buf_ptr.get(), buf, res);
-      read_ahead_cache[fi->fh] = cached_read{ino, std::move(buf_ptr), static_cast<size_t>(res), off, fi};
+      read_ahead_cache[fi->fh]
+          = cached_read{ino, std::move(buf_ptr), static_cast<size_t>(res), off, fi};
     }
   } catch (const kj::Exception &e) {
     std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
@@ -1403,7 +1405,7 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
   }
 }
 
-uint64_t add_to_write_back_cache(cached_write&& cache) {
+uint64_t add_to_write_back_cache(cached_write &&cache) {
   std::lock_guard<std::mutex> lock(write_cache_mutex);
 
   if (not write_back_cache.contains(cache.fi.fh)) {
