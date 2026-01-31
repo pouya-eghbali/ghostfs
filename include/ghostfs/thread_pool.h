@@ -55,9 +55,14 @@ namespace ghostfs {
     }
 
     // Enqueue a task and return a future for the result
-    template <class F> std::future<void> enqueue(F&& f) {
-      auto task = std::make_shared<std::packaged_task<void()>>(std::forward<F>(f));
-      std::future<void> result = task->get_future();
+    template <class F, class... Args>
+    auto enqueue(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>> {
+      using return_type = std::invoke_result_t<F, Args...>;
+
+      auto task = std::make_shared<std::packaged_task<return_type()>>(
+          std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+
+      std::future<return_type> result = task->get_future();
       {
         std::unique_lock<std::mutex> lock(queue_mutex);
         if (stop) {

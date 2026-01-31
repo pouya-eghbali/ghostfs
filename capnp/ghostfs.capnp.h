@@ -39,6 +39,8 @@
 #include "mknod.response.capnp.h"
 #include "open.capnp.h"
 #include "open.response.capnp.h"
+#include "openandread.capnp.h"
+#include "openandread.response.capnp.h"
 #include "read.capnp.h"
 #include "read.response.capnp.h"
 #include "readdir.capnp.h"
@@ -130,6 +132,8 @@ CAPNP_DECLARE_SCHEMA(a996b0c3006982b3);
 CAPNP_DECLARE_SCHEMA(ca4ad7e8f10552a4);
 CAPNP_DECLARE_SCHEMA(d4df2e13b16c5223);
 CAPNP_DECLARE_SCHEMA(978f4e9119ad7b4c);
+CAPNP_DECLARE_SCHEMA(bde47070d706f628);
+CAPNP_DECLARE_SCHEMA(f82b46ee350ab654);
 
 }  // namespace schemas
 }  // namespace capnp
@@ -417,6 +421,8 @@ struct GhostFS {
   struct BulkReadResults;
   struct BulkUploadParams;
   struct BulkUploadResults;
+  struct OpenAndReadParams;
+  struct OpenAndReadResults;
 
   #if !CAPNP_LITE
   struct _capnpPrivate {
@@ -1140,6 +1146,36 @@ struct GhostFS::BulkUploadResults {
 
   struct _capnpPrivate {
     CAPNP_DECLARE_STRUCT_HEADER(978f4e9119ad7b4c, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::OpenAndReadParams {
+  OpenAndReadParams() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(bde47070d706f628, 0, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct GhostFS::OpenAndReadResults {
+  OpenAndReadResults() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(f82b46ee350ab654, 0, 1)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -2373,6 +2409,8 @@ public:
       ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
   ::capnp::Request< ::GhostFS::BulkUploadParams,  ::GhostFS::BulkUploadResults> bulkUploadRequest(
       ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
+  ::capnp::Request< ::GhostFS::OpenAndReadParams,  ::GhostFS::OpenAndReadResults> openAndReadRequest(
+      ::kj::Maybe< ::capnp::MessageSize> sizeHint = nullptr);
 
 protected:
   Client() = default;
@@ -2485,6 +2523,10 @@ protected:
   typedef  ::GhostFS::BulkUploadResults BulkUploadResults;
   typedef ::capnp::CallContext<BulkUploadParams, BulkUploadResults> BulkUploadContext;
   virtual ::kj::Promise<void> bulkUpload(BulkUploadContext context);
+  typedef  ::GhostFS::OpenAndReadParams OpenAndReadParams;
+  typedef  ::GhostFS::OpenAndReadResults OpenAndReadResults;
+  typedef ::capnp::CallContext<OpenAndReadParams, OpenAndReadResults> OpenAndReadContext;
+  virtual ::kj::Promise<void> openAndRead(OpenAndReadContext context);
 
   inline  ::GhostFS::Client thisCap() {
     return ::capnp::Capability::Server::thisCap()
@@ -6431,6 +6473,170 @@ private:
 };
 #endif  // !CAPNP_LITE
 
+class GhostFS::OpenAndReadParams::Reader {
+public:
+  typedef OpenAndReadParams Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq() const;
+  inline  ::OpenAndRead::Reader getReq() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::OpenAndReadParams::Builder {
+public:
+  typedef OpenAndReadParams Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasReq();
+  inline  ::OpenAndRead::Builder getReq();
+  inline void setReq( ::OpenAndRead::Reader value);
+  inline  ::OpenAndRead::Builder initReq();
+  inline void adoptReq(::capnp::Orphan< ::OpenAndRead>&& value);
+  inline ::capnp::Orphan< ::OpenAndRead> disownReq();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::OpenAndReadParams::Pipeline {
+public:
+  typedef OpenAndReadParams Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::OpenAndRead::Pipeline getReq();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class GhostFS::OpenAndReadResults::Reader {
+public:
+  typedef OpenAndReadResults Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes() const;
+  inline  ::OpenAndReadResponse::Reader getRes() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class GhostFS::OpenAndReadResults::Builder {
+public:
+  typedef OpenAndReadResults Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline bool hasRes();
+  inline  ::OpenAndReadResponse::Builder getRes();
+  inline void setRes( ::OpenAndReadResponse::Reader value);
+  inline  ::OpenAndReadResponse::Builder initRes();
+  inline void adoptRes(::capnp::Orphan< ::OpenAndReadResponse>&& value);
+  inline ::capnp::Orphan< ::OpenAndReadResponse> disownRes();
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class GhostFS::OpenAndReadResults::Pipeline {
+public:
+  typedef OpenAndReadResults Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+  inline  ::OpenAndReadResponse::Pipeline getRes();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
 // =======================================================================================
 
 #if !CAPNP_LITE
@@ -8933,6 +9139,84 @@ inline void GhostFS::BulkUploadResults::Builder::adoptRes(
 }
 inline ::capnp::Orphan< ::BulkUploadResponse> GhostFS::BulkUploadResults::Builder::disownRes() {
   return ::capnp::_::PointerHelpers< ::BulkUploadResponse>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::OpenAndReadParams::Reader::hasReq() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::OpenAndReadParams::Builder::hasReq() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::OpenAndRead::Reader GhostFS::OpenAndReadParams::Reader::getReq() const {
+  return ::capnp::_::PointerHelpers< ::OpenAndRead>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::OpenAndRead::Builder GhostFS::OpenAndReadParams::Builder::getReq() {
+  return ::capnp::_::PointerHelpers< ::OpenAndRead>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::OpenAndRead::Pipeline GhostFS::OpenAndReadParams::Pipeline::getReq() {
+  return  ::OpenAndRead::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::OpenAndReadParams::Builder::setReq( ::OpenAndRead::Reader value) {
+  ::capnp::_::PointerHelpers< ::OpenAndRead>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::OpenAndRead::Builder GhostFS::OpenAndReadParams::Builder::initReq() {
+  return ::capnp::_::PointerHelpers< ::OpenAndRead>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::OpenAndReadParams::Builder::adoptReq(
+    ::capnp::Orphan< ::OpenAndRead>&& value) {
+  ::capnp::_::PointerHelpers< ::OpenAndRead>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::OpenAndRead> GhostFS::OpenAndReadParams::Builder::disownReq() {
+  return ::capnp::_::PointerHelpers< ::OpenAndRead>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline bool GhostFS::OpenAndReadResults::Reader::hasRes() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool GhostFS::OpenAndReadResults::Builder::hasRes() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::OpenAndReadResponse::Reader GhostFS::OpenAndReadResults::Reader::getRes() const {
+  return ::capnp::_::PointerHelpers< ::OpenAndReadResponse>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::OpenAndReadResponse::Builder GhostFS::OpenAndReadResults::Builder::getRes() {
+  return ::capnp::_::PointerHelpers< ::OpenAndReadResponse>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::OpenAndReadResponse::Pipeline GhostFS::OpenAndReadResults::Pipeline::getRes() {
+  return  ::OpenAndReadResponse::Pipeline(_typeless.getPointerField(0));
+}
+#endif  // !CAPNP_LITE
+inline void GhostFS::OpenAndReadResults::Builder::setRes( ::OpenAndReadResponse::Reader value) {
+  ::capnp::_::PointerHelpers< ::OpenAndReadResponse>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::OpenAndReadResponse::Builder GhostFS::OpenAndReadResults::Builder::initRes() {
+  return ::capnp::_::PointerHelpers< ::OpenAndReadResponse>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void GhostFS::OpenAndReadResults::Builder::adoptRes(
+    ::capnp::Orphan< ::OpenAndReadResponse>&& value) {
+  ::capnp::_::PointerHelpers< ::OpenAndReadResponse>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::OpenAndReadResponse> GhostFS::OpenAndReadResults::Builder::disownRes() {
+  return ::capnp::_::PointerHelpers< ::OpenAndReadResponse>::disown(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 

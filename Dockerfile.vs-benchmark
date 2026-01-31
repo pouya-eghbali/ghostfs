@@ -1,0 +1,47 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base dependencies + SSHFS + Redis (for JuiceFS metadata)
+RUN apt-get update && apt-get install -y \
+    build-essential cmake g++ git libfuse-dev libssl-dev zlib1g-dev pkg-config fuse3 \
+    sshfs openssh-server \
+    redis-server \
+    curl wget bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install JuiceFS
+RUN curl -sSL https://d.juicefs.com/install | sh -
+
+# Install MinIO (S3-compatible server for JuiceFS backend)
+RUN curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio \
+    && chmod +x /usr/local/bin/minio
+
+# Configure SSH for SSHFS (localhost)
+RUN mkdir -p /run/sshd && \
+    ssh-keygen -A && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "root:benchmark" | chpasswd && \
+    mkdir -p /root/.ssh && \
+    ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa && \
+    cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys && \
+    chmod 600 /root/.ssh/authorized_keys
+
+# Build GhostFS
+WORKDIR /ghostfs
+COPY . .
+
+RUN cmake -S standalone -B build/standalone \
+    && cmake --build build/standalone -j$(nproc)
+
+# Create benchmark directories
+RUN mkdir -p /benchmark/ghostfs-root/benchuser \
+    /benchmark/ghostfs-mount \
+    /benchmark/sshfs-root \
+    /benchmark/sshfs-mount \
+    /benchmark/juicefs-data \
+    /benchmark/juicefs-mount
+
+RUN chmod +x vs-benchmark.sh
+
+CMD ["./vs-benchmark.sh"]

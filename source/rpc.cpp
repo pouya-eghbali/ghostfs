@@ -77,8 +77,11 @@
 #include <unlink.response.capnp.h>
 #include <write.capnp.h>
 #include <write.response.capnp.h>
+#include <openandread.capnp.h>
+#include <openandread.response.capnp.h>
 
 #include <filesystem>
+#include <list>
 #include <mutex>
 #include <set>
 #include <shared_mutex>
@@ -89,6 +92,78 @@
 // This allows multi-threaded FUSE clients to share file handles across connections
 std::unordered_map<std::string, std::set<int64_t>> user_fh_sets;
 std::shared_mutex g_fh_mutex;  // Protects user_fh_sets
+
+// ============== SERVER-SIDE READ-AHEAD CACHE ==============
+// Cache recently read data on the server to reduce pread() syscalls
+// Similar to how MinIO caches data in memory
+struct ServerReadCache {
+  static constexpr size_t CACHE_SIZE = 8 * 1024 * 1024;   // 8MB per file handle
+  static constexpr size_t PREFETCH_MULTIPLIER = 2;        // Read 2x what's requested
+
+  std::vector<char> buffer;
+  off_t start_off{0};
+  size_t valid_size{0};
+  int64_t fh{-1};
+
+  ServerReadCache() : buffer(CACHE_SIZE) {}
+
+  bool contains(off_t off, size_t size) const {
+    if (fh < 0 || valid_size == 0) return false;
+    return off >= start_off && (off + static_cast<off_t>(size)) <= (start_off + static_cast<off_t>(valid_size));
+  }
+
+  const char* get_data(off_t off) const {
+    return buffer.data() + (off - start_off);
+  }
+
+  // Fill cache starting at offset, reading up to CACHE_SIZE bytes
+  ssize_t fill(int64_t file_handle, off_t off) {
+    fh = file_handle;
+    start_off = off;
+
+    ssize_t res = ::pread(fh, buffer.data(), CACHE_SIZE, off);
+    valid_size = res > 0 ? static_cast<size_t>(res) : 0;
+    return res;
+  }
+};
+
+// Per-file-handle cache (LRU with max entries)
+static constexpr size_t MAX_SERVER_CACHE_ENTRIES = 16;
+std::unordered_map<int64_t, std::unique_ptr<ServerReadCache>> g_server_read_cache;
+std::list<int64_t> g_server_cache_lru;  // Front = most recently used
+std::mutex g_server_cache_mutex;
+
+ServerReadCache* get_server_cache(int64_t fh) {
+  std::lock_guard<std::mutex> lock(g_server_cache_mutex);
+
+  auto it = g_server_read_cache.find(fh);
+  if (it != g_server_read_cache.end()) {
+    // Move to front of LRU
+    g_server_cache_lru.remove(fh);
+    g_server_cache_lru.push_front(fh);
+    return it->second.get();
+  }
+
+  // Create new cache entry
+  // Evict oldest if at capacity
+  while (g_server_read_cache.size() >= MAX_SERVER_CACHE_ENTRIES && !g_server_cache_lru.empty()) {
+    int64_t oldest = g_server_cache_lru.back();
+    g_server_cache_lru.pop_back();
+    g_server_read_cache.erase(oldest);
+  }
+
+  auto& cache = g_server_read_cache[fh];
+  cache = std::make_unique<ServerReadCache>();
+  g_server_cache_lru.push_front(fh);
+  return cache.get();
+}
+
+void remove_server_cache(int64_t fh) {
+  std::lock_guard<std::mutex> lock(g_server_cache_mutex);
+  g_server_read_cache.erase(fh);
+  g_server_cache_lru.remove(fh);
+}
+// ============== END SERVER-SIDE READ-AHEAD CACHE ==============
 
 class GhostFSImpl final : public GhostFS::Server {
   std::string user;
@@ -859,6 +934,14 @@ public:
       user_fh_sets[user].insert(fh);
     }
 
+    // Get file size for client prefetch decisions
+    struct stat st;
+    if (::fstat(fh, &st) == 0) {
+      response.setSize(st.st_size);
+    } else {
+      response.setSize(0);  // fallback: client will use prefetch
+    }
+
     OpenResponse::FuseFileInfo::Builder fi_response = response.initFi();
 
     fi_response.setCacheReaddir(fi.getCacheReaddir());
@@ -913,10 +996,7 @@ public:
     size_t size = req.getSize();
     off_t off = req.getOff();
 
-    // Use heap allocation instead of VLA to prevent stack overflow with large reads
-    std::vector<char> buf(size);
     Read::FuseFileInfo::Reader fi = req.getFi();
-
     int64_t fh = fi.getFh();
 
     {
@@ -928,24 +1008,30 @@ public:
       }
     }
 
-    ssize_t res = ::pread(fh, buf.data(), size, off);
-    uint64_t bytesRead = res > 0 ? res : 0;
+    ssize_t res;
+    int err = 0;
+    const char* data_ptr = nullptr;
 
-    int err = errno;
+    // Direct pread - no server cache (client does prefetching)
+    thread_local std::vector<char> read_buffer;
+    if (read_buffer.size() < size) {
+      read_buffer.resize(size);
+    }
+    res = ::pread(fh, read_buffer.data(), size, off);
+    if (res < 0) {
+      err = errno;
+    } else {
+      data_ptr = read_buffer.data();
+    }
 
-    // std::cout << "read_response setting ptrs" << std::endl;
-    // std::cout << "read_request size: " << size << ", read: " << bytesRead
-    //          << ", res: " << res << ", errno: " << err
-    //          << ", fh: " << fi.getFh() << std::endl;
+    uint64_t bytesRead = res > 0 ? static_cast<uint64_t>(res) : 0;
 
-    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)buf.data(), bytesRead);
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)data_ptr, bytesRead);
     capnp::Data::Reader buf_reader(buf_ptr);
 
     response.setBuf(buf_reader);
     response.setErrno(err);
     response.setRes(res);
-
-    // std::cout << "read_response sent" << std::endl;
 
     return kj::READY_NOW;
   }
@@ -1054,6 +1140,9 @@ public:
 
     // std::cout << "releasing " << fh << std::endl;
 
+    // Cleanup server-side read cache for this file handle
+    remove_server_cache(fh);
+
     int res = ::close(fh);
     int err = errno;
 
@@ -1095,13 +1184,41 @@ public:
       return kj::READY_NOW;
     }  // END EXAMPLE
 
+    // Entry info including stat data for client caching
+    struct EntryInfo {
+      std::string name;
+      uint64_t ino;
+      uint32_t mode;
+      uint64_t size;
+      uint64_t mtime;
+      uint32_t mtime_nsec;
+    };
+
     // Single pass: collect entries into vector
-    std::vector<std::pair<std::string, uint64_t>> collected_entries;
+    std::vector<EntryInfo> collected_entries;
     collected_entries.reserve(64);  // Reasonable initial capacity
 
+    // Helper to add entry with stat info
+    auto add_entry = [&](const std::string& name, uint64_t entry_ino, const std::string& entry_path) {
+      struct stat st;
+      EntryInfo info{name, entry_ino, 0, 0, 0, 0};
+      if (::stat(entry_path.c_str(), &st) == 0) {
+        info.mode = st.st_mode;
+        info.size = st.st_size;
+        #ifdef __APPLE__
+        info.mtime = st.st_mtimespec.tv_sec;
+        info.mtime_nsec = st.st_mtimespec.tv_nsec;
+        #else
+        info.mtime = st.st_mtim.tv_sec;
+        info.mtime_nsec = st.st_mtim.tv_nsec;
+        #endif
+      }
+      collected_entries.push_back(info);
+    };
+
     // Add . and ..
-    collected_entries.emplace_back(".", ino);
-    collected_entries.emplace_back("..", get_parent_ino(ino, path));
+    add_entry(".", ino, path);
+    add_entry("..", get_parent_ino(ino, path), std::filesystem::path(path).parent_path());
 
     // Single directory iteration - collect all entries
     std::filesystem::directory_iterator iter(
@@ -1111,7 +1228,7 @@ public:
       std::string file_path = entry.path();
       std::string file_name = std::filesystem::path(file_path).filename();
       uint64_t file_ino = assign_inode(file_path);
-      collected_entries.emplace_back(file_name, file_ino);
+      add_entry(file_name, file_ino, file_path);
     }
 
     // Add soft mounts for root
@@ -1119,15 +1236,19 @@ public:
       for (auto const& [dest, source] : *get_user_mounts(user)) {
         std::string file_path = std::filesystem::path(root) / source;
         uint64_t file_ino = assign_inode(file_path);
-        collected_entries.emplace_back(dest, file_ino);
+        add_entry(dest, file_ino, file_path);
       }
     }
 
     // Build response from collected entries
     ::capnp::List<ReaddirResponse::Entry>::Builder entries = response.initEntries(collected_entries.size());
     for (size_t i = 0; i < collected_entries.size(); i++) {
-      entries[i].setName(collected_entries[i].first);
-      entries[i].setIno(collected_entries[i].second);
+      entries[i].setName(collected_entries[i].name);
+      entries[i].setIno(collected_entries[i].ino);
+      entries[i].setMode(collected_entries[i].mode);
+      entries[i].setSize(collected_entries[i].size);
+      entries[i].setMtime(collected_entries[i].mtime);
+      entries[i].setMtimeNsec(collected_entries[i].mtime_nsec);
     }
 
     response.setErrno(0);
@@ -1615,6 +1736,81 @@ public:
     response.setRes(0);
     response.setErrno(0);
     response.setWritten(written);
+
+    return kj::READY_NOW;
+  }
+
+  // Combined open+read for small file optimization
+  // Reduces 2 round-trips to 1
+  kj::Promise<void> openAndRead(OpenAndReadContext context) override {
+    auto params = context.getParams();
+    auto req = params.getReq();
+
+    auto results = context.getResults();
+    auto response = results.getRes();
+
+    uint64_t ino = req.getIno();
+    std::string path = get_path_from_ino(ino);
+
+    if (path.empty()) {
+      response.setErrno(ENOENT);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    bool access_ok = check_access(root, user, suffix, path);
+
+    if (!access_ok) {
+      response.setErrno(EACCES);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    std::string open_path = get_path_for_ino(ino);
+    if (open_path.empty()) {
+      response.setRes(-1);
+      response.setErrno(ENOENT);
+      return kj::READY_NOW;
+    }
+
+    // Open the file
+    OpenAndRead::FuseFileInfo::Reader fi = req.getFi();
+    int64_t fh = ::open(open_path.c_str(), fi.getFlags());
+
+    if (fh == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Track file handle
+    {
+      std::unique_lock lock(g_fh_mutex);
+      user_fh_sets[user].insert(fh);
+    }
+
+    response.setFh(fh);
+
+    // Read the data
+    size_t size = req.getSize();
+    off_t off = req.getOff();
+
+    kj::Array<kj::byte> buf = kj::heapArray<kj::byte>(size);
+    ssize_t bytes_read = ::pread(fh, buf.begin(), size, off);
+
+    if (bytes_read == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      // Still return the file handle so client can close it
+      return kj::READY_NOW;
+    }
+
+    // Return the data
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr(buf.begin(), bytes_read);
+    capnp::Data::Reader buf_reader(buf_ptr);
+    response.setBuf(buf_reader);
+    response.setRes(bytes_read);
+    response.setErrno(0);
 
     return kj::READY_NOW;
   }

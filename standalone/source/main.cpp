@@ -61,6 +61,9 @@ auto main(int argc, char** argv) -> int {
     ("large-size", "Size of large file in MB", cxxopts::value<uint32_t>()->default_value("1000"))
     ("jobs", "Parallel jobs for benchmark", cxxopts::value<uint8_t>()->default_value("8"))
     ("no-verify", "Skip integrity verification")
+    ("pre-read-cmd", "Shell command to run before read tests (clear caches)", cxxopts::value<std::string>()->default_value(""))
+    ("write-only", "Only run write tests (skip reads, keep data for later read-only run)")
+    ("read-only", "Only run read tests (assume data exists from write-only run)")
     ("e,encrypt", "Enable client-side encryption")
     ("encryption-key", "Path to encryption key file", cxxopts::value<std::string>()->default_value(""))
     ("generate-key", "Generate a new encryption key file", cxxopts::value<std::string>())
@@ -415,6 +418,9 @@ auto main(int argc, char** argv) -> int {
     config.large_file_size_mb = result["large-size"].as<uint32_t>();
     config.parallel_jobs = result["jobs"].as<uint8_t>();
     config.verify = !result["no-verify"].as<bool>();
+    config.pre_read_cmd = result["pre-read-cmd"].as<std::string>();
+    config.write_only = result["write-only"].as<bool>();
+    config.read_only = result["read-only"].as<bool>();
 
     return ghostfs::run_benchmark(config);
 

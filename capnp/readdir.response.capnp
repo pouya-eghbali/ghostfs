@@ -6,7 +6,11 @@ struct ReaddirResponse {
   entries   @2 :List(Entry);
 
   struct Entry {
-    name  @0 :Text;
-    ino   @1 :UInt64;
+    name      @0 :Text;
+    ino       @1 :UInt64;
+    mode      @2 :UInt32;    # st_mode
+    size      @3 :UInt64;    # st_size
+    mtime     @4 :UInt64;    # st_mtime (seconds)
+    mtimeNsec @5 :UInt32;    # st_mtime (nanoseconds)
   }
 }
