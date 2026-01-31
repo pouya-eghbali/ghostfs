@@ -18,7 +18,9 @@
 #include <future>
 #include <iostream>
 #include <iterator>
+#include <list>
 #include <optional>
+#include <queue>
 #include <shared_mutex>
 #include <sstream>
 #include <thread>
@@ -34,6 +36,7 @@
 #include <kj/compat/tls.h>
 #include <kj/threadlocal.h>
 
+#include <condition_variable>
 #include <mutex>
 
 // Timeout constants (milliseconds)
@@ -83,11 +86,62 @@ constexpr uint64_t RPC_TIMEOUT_MS = 30000;        // 30 seconds for RPC calls
 #include <write.capnp.h>
 #include <write.response.capnp.h>
 
-uint8_t max_write_back_cache = 8;
+uint8_t max_write_back_cache = 64;  // Batch 64 writes before flushing (was 8)
 uint8_t max_read_ahead_cache = 8;
 
-// Maximum read-ahead buffer size to prevent memory explosion (16MB)
-constexpr size_t MAX_READ_AHEAD_BYTES = 16 * 1024 * 1024;
+// ============== READ INSTRUMENTATION ==============
+// Counters for measuring read performance
+static std::atomic<uint64_t> g_read_rpc_count{0};      // Number of RPC read calls
+static std::atomic<uint64_t> g_read_rpc_bytes{0};      // Total bytes requested via RPC
+static std::atomic<uint64_t> g_read_cache_hits{0};     // Cache hits
+static std::atomic<uint64_t> g_read_fuse_calls{0};     // Total FUSE read calls
+static std::atomic<uint64_t> g_read_fuse_bytes{0};     // Total bytes requested by FUSE
+// DEBUG: Read-ahead stats
+static std::atomic<uint64_t> g_ra_fetch_count{0};      // Number of actual fetches
+static std::atomic<uint64_t> g_ra_total_size{0};       // Total bytes requested in fetches
+static std::atomic<uint64_t> g_ra_wait_count{0};       // Number of times threads waited
+static std::atomic<uint64_t> g_ra_extend_count{0};     // Number of buffer extensions
+static std::atomic<uint64_t> g_ra_replace_count{0};    // Number of buffer replacements
+
+void print_read_stats() {
+  uint64_t rpc_count = g_read_rpc_count.load();
+  uint64_t rpc_bytes = g_read_rpc_bytes.load();
+  uint64_t cache_hits = g_read_cache_hits.load();
+  uint64_t fuse_calls = g_read_fuse_calls.load();
+  uint64_t fuse_bytes = g_read_fuse_bytes.load();
+  uint64_t ra_fetch = g_ra_fetch_count.load();
+  uint64_t ra_size = g_ra_total_size.load();
+  uint64_t ra_wait = g_ra_wait_count.load();
+
+  std::cerr << "\n====== READ STATS ======\n";
+  std::cerr << "FUSE read calls:    " << fuse_calls << "\n";
+  std::cerr << "FUSE bytes req:     " << (fuse_bytes / 1024 / 1024) << " MB\n";
+  std::cerr << "RPC read calls:     " << rpc_count << "\n";
+  std::cerr << "RPC bytes req:      " << (rpc_bytes / 1024 / 1024) << " MB\n";
+  std::cerr << "Cache hits:         " << cache_hits << "\n";
+  std::cerr << "Cache hit ratio:    " << (fuse_calls > 0 ? (100.0 * cache_hits / fuse_calls) : 0) << "%\n";
+  std::cerr << "Avg RPC size:       " << (rpc_count > 0 ? (rpc_bytes / rpc_count / 1024) : 0) << " KB\n";
+  std::cerr << "RA fetches:         " << ra_fetch << "\n";
+  std::cerr << "RA avg size:        " << (ra_fetch > 0 ? (ra_size / ra_fetch / 1024) : 0) << " KB\n";
+  std::cerr << "RA waits:           " << ra_wait << "\n";
+  std::cerr << "RA extends:         " << g_ra_extend_count.load() << "\n";
+  std::cerr << "RA replaces:        " << g_ra_replace_count.load() << "\n";
+  std::cerr << "========================\n\n";
+}
+
+void reset_read_stats() {
+  g_read_rpc_count = 0;
+  g_read_rpc_bytes = 0;
+  g_read_cache_hits = 0;
+  g_read_fuse_calls = 0;
+  g_read_fuse_bytes = 0;
+  g_ra_fetch_count = 0;
+  g_ra_total_size = 0;
+  g_ra_wait_count = 0;
+  g_ra_extend_count = 0;
+  g_ra_replace_count = 0;
+}
+// ============== END INSTRUMENTATION ==============
 
 struct cached_write {
   fuse_req_t req;
@@ -98,23 +152,379 @@ struct cached_write {
   struct fuse_file_info fi;  // Store copy, not pointer (stack memory invalid after write returns)
 };
 
-struct cached_read {
-  fuse_ino_t ino;
-  std::unique_ptr<char[]> buf;  // Owned buffer (fallback if response can't be kept)
-  const char *data_ptr;         // Pointer to actual data (either in buf or response)
-  size_t size;
-  off_t off;
-  uint64_t fh;
-  // Keep Cap'n Proto response alive to avoid copy (zero-copy caching)
-  std::optional<capnp::Response<GhostFS::ReadResults>> response;
+// ============== SIMPLE ASYNC WRITE BUFFER SYSTEM ==============
+// Double-buffered async writes - no coalescing, just parallel send
+// 1. Writes go into current buffer, reply immediately
+// 2. When buffer is full, swap to second buffer
+// 3. Background thread flushes full buffer using bulkWriteRequest
+
+static constexpr size_t ASYNC_WRITE_BUFFER_COUNT = 64;  // Writes per buffer before swap
+
+// Forward declaration
+void do_simple_flush(std::vector<cached_write>& writes);
+
+class SimpleWriteManager {
+public:
+  std::vector<cached_write> buffers[2];
+  std::atomic<int> current_buffer{0};
+  std::atomic<bool> flush_in_progress{false};
+  std::mutex swap_mutex;
+  std::condition_variable flush_cv;
+  std::thread flush_thread;
+  std::atomic<bool> shutdown{false};
+
+  SimpleWriteManager() {
+    buffers[0].reserve(ASYNC_WRITE_BUFFER_COUNT);
+    buffers[1].reserve(ASYNC_WRITE_BUFFER_COUNT);
+    flush_thread = std::thread([this]() { flush_loop(); });
+  }
+
+  ~SimpleWriteManager() {
+    shutdown.store(true);
+    flush_cv.notify_all();
+    if (flush_thread.joinable()) {
+      flush_thread.join();
+    }
+    // Flush any remaining data
+    flush_sync();
+  }
+
+  // Add write and reply immediately
+  void add_write(fuse_req_t req, fuse_ino_t ino, const char* buf, size_t size,
+                 off_t off, struct fuse_file_info* fi) {
+    // Create cached_write entry
+    cached_write cache;
+    cache.req = req;
+    cache.ino = ino;
+    cache.buf = std::make_unique<char[]>(size);
+    cache.size = size;
+    cache.off = off;
+    cache.fi = *fi;
+    std::memcpy(cache.buf.get(), buf, size);
+
+    {
+      std::unique_lock<std::mutex> lock(swap_mutex);
+      auto& current = buffers[current_buffer.load()];
+      current.push_back(std::move(cache));
+
+      // Buffer full? Swap and trigger flush
+      if (current.size() >= ASYNC_WRITE_BUFFER_COUNT) {
+        trigger_flush(lock);
+      }
+    }
+
+    // Reply immediately - async benefit comes from background send
+    fuse_reply_write(req, size);
+  }
+
+  // Synchronous flush (for close/fsync)
+  void flush_sync() {
+    std::unique_lock<std::mutex> lock(swap_mutex);
+
+    // Wait for in-progress flush
+    flush_cv.wait(lock, [this]() {
+      return !flush_in_progress.load() || shutdown.load();
+    });
+
+    auto& current = buffers[current_buffer.load()];
+    if (!current.empty()) {
+      do_simple_flush(current);
+      current.clear();
+    }
+  }
+
+  // Flush specific file handle
+  void flush_fh(uint64_t /*fh*/) {
+    flush_sync();  // Simple: flush everything
+  }
+
+private:
+  void trigger_flush(std::unique_lock<std::mutex>& lock) {
+    // Wait if previous flush still in progress
+    flush_cv.wait(lock, [this]() {
+      return !flush_in_progress.load() || shutdown.load();
+    });
+
+    if (shutdown.load()) return;
+
+    // Swap buffers
+    int old_buffer = current_buffer.load();
+    int new_buffer = 1 - old_buffer;
+
+    // Clear new buffer
+    buffers[new_buffer].clear();
+
+    current_buffer.store(new_buffer);
+    flush_in_progress.store(true);
+
+    // Wake flush thread
+    flush_cv.notify_all();
+  }
+
+  void flush_loop() {
+    while (!shutdown.load()) {
+      std::unique_lock<std::mutex> lock(swap_mutex);
+      flush_cv.wait(lock, [this]() {
+        return flush_in_progress.load() || shutdown.load();
+      });
+
+      if (shutdown.load()) break;
+
+      // Flush old buffer
+      int old_buffer = 1 - current_buffer.load();
+      auto& to_flush = buffers[old_buffer];
+
+      lock.unlock();  // Release lock during RPC
+
+      if (!to_flush.empty()) {
+        do_simple_flush(to_flush);
+        to_flush.clear();
+      }
+
+      flush_in_progress.store(false);
+      flush_cv.notify_all();
+    }
+  }
 };
 
-std::unordered_map<uint64_t, std::vector<cached_write>> write_back_cache;
-std::unordered_map<uint64_t, cached_read> read_ahead_cache;
+// Global write manager
+static SimpleWriteManager& get_write_manager() {
+  static SimpleWriteManager manager;
+  return manager;
+}
+// ============== END ASYNC WRITE BUFFER SYSTEM ==============
 
-// Mutexes for thread-safe cache access
-std::mutex write_cache_mutex;
-std::mutex read_cache_mutex;
+// ============== PROACTIVE PREFETCH SYSTEM (JuiceFS-style) ==============
+// This implements a proactive prefetch system where:
+// 1. Persistent worker threads fetch blocks ahead of reads
+// 2. Session tracking detects sequential patterns and queues prefetches
+// 3. Reads hit cache most of the time; workers keep cache warm
+
+// Configuration
+static constexpr size_t PREFETCH_BLOCK_SIZE = 4 * 1024 * 1024;  // 4MB blocks (matches JuiceFS)
+static constexpr size_t PREFETCH_QUEUE_SIZE = 75;   // Queue matches worker count
+static constexpr size_t PREFETCH_WORKERS = 75;      // Match JuiceFS exactly (75 goroutines)
+static constexpr size_t PREFETCH_WINDOW = 20;       // Prefetch 20 blocks ahead (80MB)
+static constexpr size_t MAX_CACHED_BLOCKS = 75;     // 300MB max cache per file (matches JuiceFS default)
+// Only enable prefetch after reading this many bytes sequentially
+// This prevents read amplification for small files
+static constexpr size_t SEQ_THRESHOLD = 256 * 1024; // 256KB of sequential reads before prefetching
+
+// Block states
+static constexpr int BLOCK_EMPTY = 0;
+static constexpr int BLOCK_FETCHING = 1;
+static constexpr int BLOCK_READY = 2;
+static constexpr int BLOCK_ERROR = -1;
+
+// A prefetch request in the queue
+struct PrefetchRequest {
+  fuse_ino_t ino;
+  uint64_t fh;           // File handle
+  off_t offset;          // Block-aligned offset
+  uint64_t flags;        // Open flags for RPC
+};
+
+// Cached block with data
+struct CachedBlock {
+  std::vector<char> data;
+  off_t offset{0};
+  size_t valid_size{0};
+  std::atomic<int> state{BLOCK_EMPTY};
+  std::mutex mtx;
+  std::condition_variable cv;
+
+  CachedBlock() { data.resize(PREFETCH_BLOCK_SIZE); }
+
+  bool contains(off_t off, size_t size) const {
+    if (state.load(std::memory_order_acquire) != BLOCK_READY) return false;
+    if (valid_size == 0) return false;
+    return off >= offset && (off + static_cast<off_t>(size)) <= (offset + static_cast<off_t>(valid_size));
+  }
+
+  const char* get_data(off_t off) const {
+    return data.data() + (off - offset);
+  }
+
+  size_t available_from(off_t off) const {
+    if (off < offset) return 0;
+    off_t end = offset + static_cast<off_t>(valid_size);
+    if (off >= end) return 0;
+    return static_cast<size_t>(end - off);
+  }
+};
+
+// Per-file prefetch session tracking sequential reads
+struct PrefetchSession {
+  std::atomic<off_t> last_offset{0};
+  std::atomic<off_t> prefetch_offset{0};   // Next offset to prefetch
+  std::atomic<size_t> seq_length{0};       // Sequential read length so far
+  fuse_ino_t ino{0};
+  uint64_t fh{0};
+  uint64_t flags{0};
+
+  // Block cache: map from aligned offset to block
+  std::unordered_map<off_t, std::unique_ptr<CachedBlock>> blocks;
+  std::mutex blocks_mutex;
+  std::list<off_t> lru_order;  // For eviction
+
+  // Check if offset is sequential with previous reads
+  bool is_sequential(off_t off) {
+    off_t last = last_offset.load(std::memory_order_relaxed);
+    // Sequential if reading at or near end of last read
+    return (off >= last && off <= last + 2 * static_cast<off_t>(PREFETCH_BLOCK_SIZE));
+  }
+
+  // Update tracking after a read
+  void record_read(off_t off, size_t size) {
+    if (is_sequential(off)) {
+      seq_length.fetch_add(size, std::memory_order_relaxed);
+    } else {
+      seq_length.store(size, std::memory_order_relaxed);
+    }
+    last_offset.store(off + static_cast<off_t>(size), std::memory_order_relaxed);
+  }
+
+  // Get or create a cached block
+  CachedBlock* get_block(off_t aligned_off) {
+    std::lock_guard<std::mutex> lock(blocks_mutex);
+    auto& block = blocks[aligned_off];
+    if (!block) {
+      block = std::make_unique<CachedBlock>();
+      block->offset = aligned_off;
+    }
+    // Move to front of LRU
+    lru_order.remove(aligned_off);
+    lru_order.push_front(aligned_off);
+    // Evict if over limit
+    while (blocks.size() > MAX_CACHED_BLOCKS && lru_order.size() > 0) {
+      off_t evict = lru_order.back();
+      lru_order.pop_back();
+      blocks.erase(evict);
+    }
+    return block.get();
+  }
+
+  // Find a block that contains data (without creating)
+  CachedBlock* find_block(off_t off, size_t size) {
+    off_t aligned = (off / static_cast<off_t>(PREFETCH_BLOCK_SIZE)) * static_cast<off_t>(PREFETCH_BLOCK_SIZE);
+    std::lock_guard<std::mutex> lock(blocks_mutex);
+    auto it = blocks.find(aligned);
+    if (it != blocks.end() && it->second->contains(off, size)) {
+      // Move to front of LRU
+      lru_order.remove(aligned);
+      lru_order.push_front(aligned);
+      return it->second.get();
+    }
+    return nullptr;
+  }
+
+  // Check if block is being fetched
+  bool is_fetching(off_t aligned_off) {
+    std::lock_guard<std::mutex> lock(blocks_mutex);
+    auto it = blocks.find(aligned_off);
+    if (it != blocks.end()) {
+      return it->second->state.load(std::memory_order_acquire) == BLOCK_FETCHING;
+    }
+    return false;
+  }
+};
+
+// Global prefetch queue and workers
+class PrefetchManager {
+public:
+  std::queue<PrefetchRequest> queue;
+  std::mutex queue_mutex;
+  std::condition_variable queue_cv;
+  std::atomic<bool> shutdown{false};
+  std::vector<std::thread> workers;
+
+  // Sessions per file handle
+  std::unordered_map<uint64_t, std::unique_ptr<PrefetchSession>> sessions;
+  std::mutex sessions_mutex;
+
+  PrefetchManager() {
+    // Start worker threads
+    for (size_t i = 0; i < PREFETCH_WORKERS; ++i) {
+      workers.emplace_back([this, i]() { worker_loop(i); });
+    }
+  }
+
+  ~PrefetchManager() {
+    shutdown.store(true);
+    queue_cv.notify_all();
+    for (auto& w : workers) {
+      if (w.joinable()) w.join();
+    }
+  }
+
+  PrefetchSession* get_session(uint64_t fh) {
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    auto& sess = sessions[fh];
+    if (!sess) {
+      sess = std::make_unique<PrefetchSession>();
+      sess->fh = fh;
+    }
+    return sess.get();
+  }
+
+  void remove_session(uint64_t fh) {
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    sessions.erase(fh);
+  }
+
+  // Queue a prefetch request (non-blocking, drops if queue full)
+  void enqueue(const PrefetchRequest& req) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    if (queue.size() < PREFETCH_QUEUE_SIZE) {
+      queue.push(req);
+      queue_cv.notify_one();
+    }
+    // Drop if full (backpressure like JuiceFS)
+  }
+
+  // Queue multiple prefetch requests for upcoming blocks
+  void prefetch_ahead(fuse_ino_t ino, uint64_t fh, uint64_t flags, off_t current_off) {
+    PrefetchSession* sess = get_session(fh);
+    sess->ino = ino;
+    sess->flags = flags;
+
+    off_t aligned = (current_off / static_cast<off_t>(PREFETCH_BLOCK_SIZE)) * static_cast<off_t>(PREFETCH_BLOCK_SIZE);
+
+    // Prefetch next PREFETCH_WINDOW blocks
+    for (size_t i = 1; i <= PREFETCH_WINDOW; ++i) {
+      off_t prefetch_off = aligned + static_cast<off_t>(i * PREFETCH_BLOCK_SIZE);
+
+      // Skip if already cached or being fetched
+      CachedBlock* block = sess->get_block(prefetch_off);
+      int state = block->state.load(std::memory_order_acquire);
+      if (state == BLOCK_READY || state == BLOCK_FETCHING) {
+        continue;
+      }
+
+      // Try to claim for fetching
+      int expected = BLOCK_EMPTY;
+      if (block->state.compare_exchange_strong(expected, BLOCK_FETCHING)) {
+        PrefetchRequest req{ino, fh, prefetch_off, flags};
+        enqueue(req);
+      }
+    }
+  }
+
+private:
+  void worker_loop(size_t worker_id);  // Forward declaration, defined after do_read_rpc
+};
+
+// Global prefetch manager (lazy-initialized)
+static PrefetchManager& get_prefetch_manager() {
+  static PrefetchManager manager;
+  return manager;
+}
+
+// Helper functions for prefetch buffer management
+void remove_prefetch_buffer(uint64_t fh) {
+  get_prefetch_manager().remove_session(fh);
+}
+// ============== END PROACTIVE PREFETCH SYSTEM ==============
 
 // Encryption state
 static bool g_encryption_enabled = false;
@@ -786,32 +1196,6 @@ static void ghostfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_inf
   }
 }
 
-bool reply_from_cache(fuse_req_t req, uint64_t fh, size_t size, off_t off) {
-  std::lock_guard<std::mutex> lock(read_cache_mutex);
-
-  auto it = read_ahead_cache.find(fh);
-  if (it == read_ahead_cache.end()) {
-    return false;
-  }
-
-  const cached_read &cache = it->second;
-
-  if (cache.off > off) {
-    return false;
-  }
-
-  uint64_t cache_end = cache.off + cache.size;
-  uint64_t read_end = off + size;
-
-  if (read_end > cache_end) {
-    return false;
-  }
-
-  // Use data_ptr which points to either the zero-copy response buffer or owned buf
-  fuse_reply_buf(req, cache.data_ptr + (off - cache.off), size);
-  return true;
-}
-
 // Encrypted read: reads and decrypts data from server
 static void encrypted_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                            struct fuse_file_info *fi) {
@@ -1280,7 +1664,10 @@ static void encrypted_write(fuse_req_t req, fuse_ino_t ino, const char *buf, siz
   }
 }
 
-void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
+// Internal function that does the actual RPC read
+// Returns nullopt on failure, or the response on success
+std::optional<capnp::Response<GhostFS::ReadResults>> do_read_rpc(
+    fuse_ino_t ino, size_t read_ahead_size, off_t off, struct fuse_file_info *fi) {
   try {
     auto &rpc = getRpc();
     auto &waitScope = rpc.ioContext->waitScope;
@@ -1290,54 +1677,262 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
     Read::Builder read = request.getReq();
     Read::FuseFileInfo::Builder fuseFileInfo = read.initFi();
 
-    // Cap the read-ahead size to prevent memory explosion
-    size_t read_ahead_size = size * max_read_ahead_cache;
-    if (read_ahead_size > MAX_READ_AHEAD_BYTES) {
-      read_ahead_size = MAX_READ_AHEAD_BYTES;
-    }
+    // INSTRUMENTATION
+    ++g_read_rpc_count;
+    g_read_rpc_bytes += read_ahead_size;
 
     read.setIno(ino);
     read.setSize(read_ahead_size);
     read.setOff(off);
-
     fillFileInfo(&fuseFileInfo, fi);
 
     auto result = waitWithTimeout(request.send(), timer, waitScope);
     auto response = result.getRes();
 
     int res = response.getRes();
-
     if (res == -1) {
-      fuse_reply_err(req, response.getErrno());
-      return;
+      return std::nullopt;
     }
 
+    return std::move(result);
+  } catch (const kj::Exception &e) {
+    std::cerr << "do_read_rpc error: " << e.getDescription().cStr() << std::endl;
+    return std::nullopt;
+  }
+}
+
+// Worker loop for prefetch manager - runs in dedicated threads
+void PrefetchManager::worker_loop(size_t worker_id) {
+  (void)worker_id;  // Can be used for debugging
+
+  while (!shutdown.load()) {
+    PrefetchRequest req;
+
+    // Wait for work
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex);
+      queue_cv.wait(lock, [this]() {
+        return shutdown.load() || !queue.empty();
+      });
+
+      if (shutdown.load() && queue.empty()) {
+        return;
+      }
+
+      if (queue.empty()) continue;
+
+      req = queue.front();
+      queue.pop();
+    }
+
+    // Get the session and block
+    PrefetchSession* sess = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex);
+      auto it = sessions.find(req.fh);
+      if (it == sessions.end()) continue;  // Session was removed
+      sess = it->second.get();
+    }
+
+    CachedBlock* block = sess->get_block(req.offset);
+    if (!block) continue;
+
+    // Check if still needs fetching
+    if (block->state.load(std::memory_order_acquire) != BLOCK_FETCHING) {
+      continue;  // Already fetched or abandoned
+    }
+
+    // Track stats
+    ++g_ra_fetch_count;
+    g_ra_total_size += PREFETCH_BLOCK_SIZE;
+
+    // Do the RPC - worker has its own thread-local connection
+    // Create a minimal fi structure with just the file handle and flags
+    struct fuse_file_info fi_copy = {};
+    fi_copy.fh = req.fh;
+    fi_copy.flags = static_cast<int>(req.flags);
+
+    auto result_opt = do_read_rpc(req.ino, PREFETCH_BLOCK_SIZE, req.offset, &fi_copy);
+
+    if (!result_opt) {
+      block->state.store(BLOCK_ERROR, std::memory_order_release);
+      block->cv.notify_all();
+      continue;
+    }
+
+    auto result = std::move(*result_opt);
+    auto response = result.getRes();
     capnp::Data::Reader buf_reader = response.getBuf();
     const auto chars = buf_reader.asChars();
-    const char *buf = chars.begin();
+    size_t data_size = static_cast<size_t>(response.getRes());
 
-    fuse_reply_buf(req, buf, LOCAL_MIN(size, static_cast<size_t>(res)));
-
-    if (static_cast<size_t>(res) > size) {
-      std::lock_guard<std::mutex> lock(read_cache_mutex);
-
-      // Zero-copy: keep the Cap'n Proto response alive instead of copying
-      // The response owns the buffer, so as long as it's alive, buf is valid
-      cached_read cache;
-      cache.ino = ino;
-      cache.data_ptr = buf;
-      cache.size = static_cast<size_t>(res);
-      cache.off = off;
-      cache.fh = fi->fh;
-      cache.response = std::move(result);  // Move response to keep buffer alive
-      cache.buf = nullptr;                 // Not using owned buffer
-
-      read_ahead_cache[fi->fh] = std::move(cache);
+    // Store data
+    {
+      std::lock_guard<std::mutex> lock(block->mtx);
+      if (data_size > 0) {
+        std::memcpy(block->data.data(), chars.begin(), data_size);
+      }
+      block->valid_size = data_size;
+      block->state.store(BLOCK_READY, std::memory_order_release);
     }
-  } catch (const kj::Exception &e) {
-    std::cerr << "read_ahead error: " << e.getDescription().cStr() << std::endl;
-    fuse_reply_err(req, ETIMEDOUT);
+    block->cv.notify_all();
   }
+}
+
+// Direct read - no prefetch, fetch exactly what's requested
+// Used for small files and random access to avoid read amplification
+void direct_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
+  ++g_read_rpc_count;
+  g_read_rpc_bytes += size;
+
+  auto result_opt = do_read_rpc(ino, size, off, fi);
+  if (!result_opt) {
+    fuse_reply_err(req, EIO);
+    return;
+  }
+
+  auto result = std::move(*result_opt);
+  auto response = result.getRes();
+  int res = response.getRes();
+
+  if (res == -1) {
+    fuse_reply_err(req, response.getErrno());
+    return;
+  }
+
+  capnp::Data::Reader buf_reader = response.getBuf();
+  const auto chars = buf_reader.asChars();
+  fuse_reply_buf(req, chars.begin(), res);
+}
+
+// Threshold for detecting large file reads (bypass SEQ_THRESHOLD)
+static constexpr size_t LARGE_READ_SIZE = 64 * 1024;  // 64KB - typical FUSE read size for sequential
+
+// Proactive read with prefetch - only used after sequential pattern is detected
+void proactive_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
+  auto& manager = get_prefetch_manager();
+  PrefetchSession* sess = manager.get_session(fi->fh);
+  sess->ino = ino;
+  sess->fh = fi->fh;
+  sess->flags = static_cast<uint64_t>(fi->flags);
+
+  // Check if sequential BEFORE recording this read
+  bool was_sequential = sess->is_sequential(off);
+
+  // Update session tracking
+  sess->record_read(off, size);
+
+  // Determine if we should use prefetch:
+  // 1. Large reads (>= 64KB) indicate large file sequential access - use prefetch immediately
+  // 2. For small reads, wait until we've seen SEQ_THRESHOLD bytes sequentially
+  bool use_prefetch = false;
+
+  if (size >= LARGE_READ_SIZE) {
+    // Large read - likely a big file being read sequentially
+    // Use prefetch immediately to avoid latency on first reads
+    use_prefetch = true;
+  } else {
+    // Small read - check sequential pattern to avoid read amplification on small files
+    size_t seq_len = sess->seq_length.load(std::memory_order_relaxed);
+    use_prefetch = was_sequential && seq_len >= SEQ_THRESHOLD;
+  }
+
+  if (!use_prefetch) {
+    direct_read(req, ino, size, off, fi);
+    return;
+  }
+
+  // === Large read or sequential pattern detected - use prefetch system ===
+
+  off_t aligned_off = (off / static_cast<off_t>(PREFETCH_BLOCK_SIZE)) * static_cast<off_t>(PREFETCH_BLOCK_SIZE);
+
+  // Step 1: Check cache (fast path)
+  CachedBlock* cached = sess->find_block(off, size);
+  if (cached) {
+    fuse_reply_buf(req, cached->get_data(off), size);
+    ++g_read_cache_hits;
+    manager.prefetch_ahead(ino, fi->fh, sess->flags, off);
+    return;
+  }
+
+  // Step 2: Check if block is being fetched
+  CachedBlock* block = sess->get_block(aligned_off);
+  int state = block->state.load(std::memory_order_acquire);
+
+  if (state == BLOCK_FETCHING) {
+    // Wait for prefetch to complete
+    ++g_ra_wait_count;
+    std::unique_lock<std::mutex> lock(block->mtx);
+    block->cv.wait(lock, [block]() {
+      return block->state.load(std::memory_order_acquire) != BLOCK_FETCHING;
+    });
+
+    if (block->contains(off, size)) {
+      fuse_reply_buf(req, block->get_data(off), size);
+      ++g_read_cache_hits;
+      manager.prefetch_ahead(ino, fi->fh, sess->flags, off);
+      return;
+    }
+  }
+
+  // Step 3: Cache miss - fetch synchronously
+  int expected = BLOCK_EMPTY;
+  if (block->state.compare_exchange_strong(expected, BLOCK_FETCHING) ||
+      block->state.load() == BLOCK_ERROR) {
+    if (expected == BLOCK_ERROR) {
+      block->state.store(BLOCK_FETCHING);
+    }
+  } else if (block->state.load() == BLOCK_READY && block->contains(off, size)) {
+    fuse_reply_buf(req, block->get_data(off), size);
+    ++g_read_cache_hits;
+    manager.prefetch_ahead(ino, fi->fh, sess->flags, off);
+    return;
+  }
+
+  // Track stats
+  ++g_ra_fetch_count;
+  g_ra_total_size += PREFETCH_BLOCK_SIZE;
+
+  // Fetch the block
+  auto result_opt = do_read_rpc(ino, PREFETCH_BLOCK_SIZE, aligned_off, fi);
+
+  if (!result_opt) {
+    block->state.store(BLOCK_ERROR, std::memory_order_release);
+    block->cv.notify_all();
+    fuse_reply_err(req, EIO);
+    return;
+  }
+
+  auto result = std::move(*result_opt);
+  auto response = result.getRes();
+  capnp::Data::Reader buf_reader = response.getBuf();
+  const auto chars = buf_reader.asChars();
+  const char* data = chars.begin();
+  size_t data_size = static_cast<size_t>(response.getRes());
+
+  // Reply FIRST from RPC data (zero extra copy for the user's data)
+  size_t offset_in_block = static_cast<size_t>(off - aligned_off);
+  if (data_size > 0 && offset_in_block < data_size) {
+    size_t available = data_size - offset_in_block;
+    fuse_reply_buf(req, data + offset_in_block, LOCAL_MIN(size, available));
+  } else {
+    fuse_reply_buf(req, nullptr, 0);  // EOF
+  }
+
+  // Trigger prefetch immediately after reply (don't wait for caching)
+  manager.prefetch_ahead(ino, fi->fh, sess->flags, off);
+
+  // Cache for subsequent reads (non-blocking relative to user)
+  {
+    std::lock_guard<std::mutex> lock(block->mtx);
+    if (data_size > 0) {
+      std::memcpy(block->data.data(), data, data_size);
+    }
+    block->valid_size = data_size;
+    block->offset = aligned_off;
+    block->state.store(BLOCK_READY, std::memory_order_release);
+  }
+  block->cv.notify_all();
 }
 
 /**
@@ -1364,24 +1959,27 @@ void read_ahead(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct f
  */
 static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                             struct fuse_file_info *fi) {
+  // INSTRUMENTATION: Track all FUSE read calls
+  ++g_read_fuse_calls;
+  g_read_fuse_bytes += size;
+
   // Use encrypted read when encryption is enabled
   if (g_encryption_enabled) {
     encrypted_read(req, ino, size, off, fi);
     return;
   }
 
-  // Legacy read-ahead cache (disabled when max_read_ahead_cache == 0)
+  // Proactive prefetch read-ahead cache (disabled when max_read_ahead_cache == 0)
   if (max_read_ahead_cache > 0) {
-    bool is_cached = reply_from_cache(req, fi->fh, size, off);
-
-    if (!is_cached) {
-      read_ahead(req, ino, size, off, fi);
-    }
-
+    proactive_read(req, ino, size, off, fi);
     return;
   }
 
   // Direct read - single RPC call (FUSE kernel handles read-ahead via max_readahead option)
+  // INSTRUMENTATION
+  ++g_read_rpc_count;
+  g_read_rpc_bytes += size;
+
   try {
     auto &rpc = getRpc();
     auto &waitScope = rpc.ioContext->waitScope;
@@ -1417,37 +2015,9 @@ static void ghostfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t o
   }
 }
 
-uint64_t add_to_write_back_cache(cached_write &&cache) {
-  std::lock_guard<std::mutex> lock(write_cache_mutex);
-
-  if (not write_back_cache.contains(cache.fi.fh)) {
-    write_back_cache[cache.fi.fh] = std::vector<cached_write>();
-  }
-
-  write_back_cache[cache.fi.fh].push_back(std::move(cache));
-  return write_back_cache[cache.fi.fh].size();
-}
-
-void flush_write_back_cache(uint64_t fh, bool reply) {
-  std::vector<cached_write> entries_to_flush;
-
-  // Extract entries under lock, then release lock before RPC
-  {
-    std::lock_guard<std::mutex> lock(write_cache_mutex);
-
-    if (not write_back_cache.contains(fh)) {
-      return;
-    }
-
-    if (write_back_cache[fh].empty()) {
-      return;
-    }
-
-    entries_to_flush = std::move(write_back_cache[fh]);
-    write_back_cache.erase(fh);
-  }
-
-  uint64_t cached = entries_to_flush.size();
+// Flush writes using bulkWriteRequest
+void do_simple_flush(std::vector<cached_write>& writes) {
+  if (writes.empty()) return;
 
   try {
     auto &rpc = getRpc();
@@ -1455,44 +2025,31 @@ void flush_write_back_cache(uint64_t fh, bool reply) {
     auto &timer = rpc.getTimer();
     auto request = rpc.client->bulkWriteRequest();
 
-    capnp::List<Write>::Builder write = request.initReq(cached);
+    size_t count = writes.size();
+    capnp::List<Write>::Builder write_list = request.initReq(count);
 
-    uint8_t i = 0;
-    for (auto &cache : entries_to_flush) {
-      write[i].setIno(cache.ino);
-      write[i].setOff(cache.off);
-      write[i].setSize(cache.size);
+    for (size_t i = 0; i < count; ++i) {
+      auto& cache = writes[i];
 
-      kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte *)cache.buf.get(), cache.size);
+      write_list[i].setIno(cache.ino);
+      write_list[i].setOff(cache.off);
+      write_list[i].setSize(cache.size);
+
+      kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr(
+        reinterpret_cast<kj::byte*>(cache.buf.get()), cache.size);
       capnp::Data::Reader buf_reader(buf_ptr);
-      write[i].setBuf(buf_reader);
+      write_list[i].setBuf(buf_reader);
 
-      Write::FuseFileInfo::Builder fuseFileInfo = write[i].initFi();
-      fillFileInfo(&fuseFileInfo, &cache.fi);
-
-      i++;
+      Write::FuseFileInfo::Builder fi = write_list[i].initFi();
+      fillFileInfo(&fi, &cache.fi);
     }
 
     auto result = waitWithTimeout(request.send(), timer, waitScope);
+    // Replies already sent - just ensure RPC completes
 
-    if (reply) {
-      auto response = result.getRes();
-      int res = response[cached - 1].getRes();
-      auto req = entries_to_flush[cached - 1].req;
-
-      if (res == -1) {
-        fuse_reply_err(req, response[cached - 1].getErrno());
-      } else {
-        fuse_reply_write(req, response[cached - 1].getWritten());
-      }
-    }
   } catch (const kj::Exception &e) {
-    std::cerr << "flush_write_back_cache error: " << e.getDescription().cStr() << std::endl;
-    if (reply && cached > 0) {
-      fuse_reply_err(entries_to_flush[cached - 1].req, ETIMEDOUT);
-    }
+    std::cerr << "do_simple_flush error: " << e.getDescription().cStr() << std::endl;
   }
-  // unique_ptr automatically frees buffers when entries_to_flush goes out of scope
 }
 
 /**
@@ -1526,30 +2083,14 @@ static void ghostfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, si
     return;
   }
 
+  // Invalidate read cache on write (data changed)
   if (max_read_ahead_cache > 0) {
-    std::lock_guard<std::mutex> lock(read_cache_mutex);
-    if (read_ahead_cache.contains(fi->fh)) {
-      read_ahead_cache.erase(fi->fh);  // unique_ptr auto-frees
-    }
+    remove_prefetch_buffer(fi->fh);
   }
 
+  // Use async double-buffer for better throughput
   if (max_write_back_cache > 0) {
-    cached_write cache;
-    cache.req = req;
-    cache.ino = ino;
-    cache.buf = std::make_unique<char[]>(size);
-    cache.size = size;
-    cache.off = off;
-    cache.fi = *fi;  // Copy fi, not pointer
-    memcpy(cache.buf.get(), buf, size);
-    uint64_t cached = add_to_write_back_cache(std::move(cache));
-
-    if (cached >= max_write_back_cache) {
-      flush_write_back_cache(fi->fh, true);
-    } else {
-      fuse_reply_write(req, size);
-    }
-
+    get_write_manager().add_write(req, ino, buf, size, off, fi);
     return;
   }
 
@@ -2031,8 +2572,17 @@ static void ghostfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
  * @param mode -> uint64_t
  */
 static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+  // INSTRUMENTATION: Print stats on file close if significant reads occurred
+  if (g_read_fuse_bytes > 100 * 1024 * 1024) {  // More than 100MB read
+    print_read_stats();
+    reset_read_stats();
+  }
+
   // Flush any pending writes before releasing the file handle
-  flush_write_back_cache(fi->fh, false);
+  get_write_manager().flush_fh(fi->fh);
+
+  // Cleanup prefetch buffer
+  remove_prefetch_buffer(fi->fh);
 
   // Cleanup crypto context
   if (g_encryption_enabled) {
@@ -2080,7 +2630,7 @@ static void ghostfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_
  * @param mode -> uint64_t
  */
 static void ghostfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-  flush_write_back_cache(fi->fh, false);
+  get_write_manager().flush_fh(fi->fh);
 
   try {
     auto &rpc = getRpc();
@@ -2122,7 +2672,7 @@ static void ghostfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_in
  */
 static void ghostfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                              struct fuse_file_info *fi) {
-  flush_write_back_cache(fi->fh, false);
+  get_write_manager().flush_fh(fi->fh);
 
   try {
     auto &rpc = getRpc();
@@ -2331,6 +2881,12 @@ static void ghostfs_ll_init(void *userdata, struct fuse_conn_info *conn) {
   if (conn->capable & FUSE_CAP_BIG_WRITES) {
     conn->want |= FUSE_CAP_BIG_WRITES;
   }
+
+  // Increase background request limits for higher parallelism
+  // These control how many concurrent FUSE requests the kernel can have in flight
+  // Default is typically 12, which limits throughput on high-latency connections
+  conn->max_background = 256;        // Allow many concurrent background requests
+  conn->congestion_threshold = 200;  // Start throttling new requests at this level
 
   // Note: We do NOT modify conn->max_write or conn->max_readahead here.
   // Setting these values causes "Invalid argument" errors in some Docker

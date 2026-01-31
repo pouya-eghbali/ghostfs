@@ -78,7 +78,9 @@
 #include <write.capnp.h>
 #include <write.response.capnp.h>
 
+#include <chrono>
 #include <filesystem>
+#include <list>
 #include <mutex>
 #include <set>
 #include <shared_mutex>
@@ -89,6 +91,124 @@
 // This allows multi-threaded FUSE clients to share file handles across connections
 std::unordered_map<std::string, std::set<int64_t>> user_fh_sets;
 std::shared_mutex g_fh_mutex;  // Protects user_fh_sets
+
+// ============== SERVER READ INSTRUMENTATION ==============
+// Set GHOSTFS_DUMMY_READ=1 to return pre-generated data instead of actual file reads
+// This isolates RPC overhead from filesystem I/O
+static bool g_dummy_read_mode = false;
+static std::vector<char> g_dummy_buffer;  // Pre-allocated buffer for dummy reads
+
+static std::atomic<uint64_t> g_server_read_count{0};
+static std::atomic<uint64_t> g_server_read_bytes{0};
+static std::atomic<uint64_t> g_server_pread_time_us{0};  // Microseconds spent in pread
+
+void init_dummy_read_mode() {
+  const char* env = std::getenv("GHOSTFS_DUMMY_READ");
+  if (env && std::string(env) == "1") {
+    g_dummy_read_mode = true;
+    // Pre-allocate 16MB of random-ish data
+    g_dummy_buffer.resize(16 * 1024 * 1024);
+    for (size_t i = 0; i < g_dummy_buffer.size(); i++) {
+      g_dummy_buffer[i] = static_cast<char>(i & 0xFF);
+    }
+    std::cerr << "[SERVER] Dummy read mode ENABLED - returning pre-generated data\n";
+  }
+}
+
+void print_server_read_stats() {
+  uint64_t count = g_server_read_count.load();
+  uint64_t bytes = g_server_read_bytes.load();
+  uint64_t pread_us = g_server_pread_time_us.load();
+
+  std::cerr << "\n====== SERVER READ STATS ======\n";
+  std::cerr << "Read requests:      " << count << "\n";
+  std::cerr << "Total bytes:        " << (bytes / 1024 / 1024) << " MB\n";
+  std::cerr << "Avg request size:   " << (count > 0 ? bytes / count / 1024 : 0) << " KB\n";
+  std::cerr << "Total pread time:   " << (pread_us / 1000) << " ms\n";
+  std::cerr << "Avg pread latency:  " << (count > 0 ? pread_us / count : 0) << " us\n";
+  if (g_dummy_read_mode) {
+    std::cerr << "Mode:               DUMMY (no actual I/O)\n";
+  }
+  std::cerr << "================================\n\n";
+}
+// ============== END SERVER INSTRUMENTATION ==============
+
+// ============== SERVER-SIDE READ-AHEAD CACHE ==============
+// Cache recently read data on the server to reduce pread() syscalls
+// Similar to how MinIO caches data in memory
+struct ServerReadCache {
+  static constexpr size_t CACHE_SIZE = 8 * 1024 * 1024;   // 8MB per file handle
+  static constexpr size_t PREFETCH_MULTIPLIER = 2;        // Read 2x what's requested
+
+  std::vector<char> buffer;
+  off_t start_off{0};
+  size_t valid_size{0};
+  int64_t fh{-1};
+
+  ServerReadCache() : buffer(CACHE_SIZE) {}
+
+  bool contains(off_t off, size_t size) const {
+    if (fh < 0 || valid_size == 0) return false;
+    return off >= start_off && (off + static_cast<off_t>(size)) <= (start_off + static_cast<off_t>(valid_size));
+  }
+
+  const char* get_data(off_t off) const {
+    return buffer.data() + (off - start_off);
+  }
+
+  // Fill cache starting at offset, reading up to CACHE_SIZE bytes
+  ssize_t fill(int64_t file_handle, off_t off) {
+    fh = file_handle;
+    start_off = off;
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    ssize_t res = ::pread(fh, buffer.data(), CACHE_SIZE, off);
+    auto t2 = std::chrono::high_resolution_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+    g_server_pread_time_us += us;
+
+    valid_size = res > 0 ? static_cast<size_t>(res) : 0;
+    return res;
+  }
+};
+
+// Per-file-handle cache (LRU with max entries)
+static constexpr size_t MAX_SERVER_CACHE_ENTRIES = 16;
+std::unordered_map<int64_t, std::unique_ptr<ServerReadCache>> g_server_read_cache;
+std::list<int64_t> g_server_cache_lru;  // Front = most recently used
+std::mutex g_server_cache_mutex;
+
+ServerReadCache* get_server_cache(int64_t fh) {
+  std::lock_guard<std::mutex> lock(g_server_cache_mutex);
+
+  auto it = g_server_read_cache.find(fh);
+  if (it != g_server_read_cache.end()) {
+    // Move to front of LRU
+    g_server_cache_lru.remove(fh);
+    g_server_cache_lru.push_front(fh);
+    return it->second.get();
+  }
+
+  // Create new cache entry
+  // Evict oldest if at capacity
+  while (g_server_read_cache.size() >= MAX_SERVER_CACHE_ENTRIES && !g_server_cache_lru.empty()) {
+    int64_t oldest = g_server_cache_lru.back();
+    g_server_cache_lru.pop_back();
+    g_server_read_cache.erase(oldest);
+  }
+
+  auto& cache = g_server_read_cache[fh];
+  cache = std::make_unique<ServerReadCache>();
+  g_server_cache_lru.push_front(fh);
+  return cache.get();
+}
+
+void remove_server_cache(int64_t fh) {
+  std::lock_guard<std::mutex> lock(g_server_cache_mutex);
+  g_server_read_cache.erase(fh);
+  g_server_cache_lru.remove(fh);
+}
+// ============== END SERVER-SIDE READ-AHEAD CACHE ==============
 
 class GhostFSImpl final : public GhostFS::Server {
   std::string user;
@@ -913,10 +1033,16 @@ public:
     size_t size = req.getSize();
     off_t off = req.getOff();
 
-    // Use heap allocation instead of VLA to prevent stack overflow with large reads
-    std::vector<char> buf(size);
-    Read::FuseFileInfo::Reader fi = req.getFi();
+    // INSTRUMENTATION
+    uint64_t count = ++g_server_read_count;
+    uint64_t total_bytes = (g_server_read_bytes += size);
 
+    // Print stats every ~500MB
+    if (count > 0 && (total_bytes / (500 * 1024 * 1024)) > ((total_bytes - size) / (500 * 1024 * 1024))) {
+      print_server_read_stats();
+    }
+
+    Read::FuseFileInfo::Reader fi = req.getFi();
     int64_t fh = fi.getFh();
 
     {
@@ -928,24 +1054,37 @@ public:
       }
     }
 
-    ssize_t res = ::pread(fh, buf.data(), size, off);
-    uint64_t bytesRead = res > 0 ? res : 0;
+    ssize_t res;
+    int err = 0;
+    const char* data_ptr = nullptr;
 
-    int err = errno;
+    if (g_dummy_read_mode) {
+      // Return pre-generated dummy data (no actual I/O)
+      size_t dummy_size = std::min(size, g_dummy_buffer.size());
+      data_ptr = g_dummy_buffer.data();
+      res = static_cast<ssize_t>(dummy_size);
+    } else {
+      // Direct pread - no server cache (client does prefetching)
+      thread_local std::vector<char> read_buffer;
+      if (read_buffer.size() < size) {
+        read_buffer.resize(size);
+      }
+      res = ::pread(fh, read_buffer.data(), size, off);
+      if (res < 0) {
+        err = errno;
+      } else {
+        data_ptr = read_buffer.data();
+      }
+    }
 
-    // std::cout << "read_response setting ptrs" << std::endl;
-    // std::cout << "read_request size: " << size << ", read: " << bytesRead
-    //          << ", res: " << res << ", errno: " << err
-    //          << ", fh: " << fi.getFh() << std::endl;
+    uint64_t bytesRead = res > 0 ? static_cast<uint64_t>(res) : 0;
 
-    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)buf.data(), bytesRead);
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr((kj::byte*)data_ptr, bytesRead);
     capnp::Data::Reader buf_reader(buf_ptr);
 
     response.setBuf(buf_reader);
     response.setErrno(err);
     response.setRes(res);
-
-    // std::cout << "read_response sent" << std::endl;
 
     return kj::READY_NOW;
   }
@@ -1053,6 +1192,9 @@ public:
     }
 
     // std::cout << "releasing " << fh << std::endl;
+
+    // Cleanup server-side read cache for this file handle
+    remove_server_cache(fh);
 
     int res = ::close(fh);
     int err = errno;
@@ -1852,6 +1994,9 @@ std::string read_file(const std::string& path) {
 
 int start_rpc_server(std::string bind, int port, int auth_port, std::string root,
                      std::string suffix, std::string key_file, std::string cert_file) {
+  // INSTRUMENTATION: Initialize dummy read mode if GHOSTFS_DUMMY_READ=1
+  init_dummy_read_mode();
+
   if (root.length() > 0) {
     if (not std::filesystem::is_directory(root)) {
       std::error_code ec;
