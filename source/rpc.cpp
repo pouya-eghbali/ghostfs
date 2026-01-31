@@ -77,8 +77,9 @@
 #include <unlink.response.capnp.h>
 #include <write.capnp.h>
 #include <write.response.capnp.h>
+#include <openandread.capnp.h>
+#include <openandread.response.capnp.h>
 
-#include <chrono>
 #include <filesystem>
 #include <list>
 #include <mutex>
@@ -91,47 +92,6 @@
 // This allows multi-threaded FUSE clients to share file handles across connections
 std::unordered_map<std::string, std::set<int64_t>> user_fh_sets;
 std::shared_mutex g_fh_mutex;  // Protects user_fh_sets
-
-// ============== SERVER READ INSTRUMENTATION ==============
-// Set GHOSTFS_DUMMY_READ=1 to return pre-generated data instead of actual file reads
-// This isolates RPC overhead from filesystem I/O
-static bool g_dummy_read_mode = false;
-static std::vector<char> g_dummy_buffer;  // Pre-allocated buffer for dummy reads
-
-static std::atomic<uint64_t> g_server_read_count{0};
-static std::atomic<uint64_t> g_server_read_bytes{0};
-static std::atomic<uint64_t> g_server_pread_time_us{0};  // Microseconds spent in pread
-
-void init_dummy_read_mode() {
-  const char* env = std::getenv("GHOSTFS_DUMMY_READ");
-  if (env && std::string(env) == "1") {
-    g_dummy_read_mode = true;
-    // Pre-allocate 16MB of random-ish data
-    g_dummy_buffer.resize(16 * 1024 * 1024);
-    for (size_t i = 0; i < g_dummy_buffer.size(); i++) {
-      g_dummy_buffer[i] = static_cast<char>(i & 0xFF);
-    }
-    std::cerr << "[SERVER] Dummy read mode ENABLED - returning pre-generated data\n";
-  }
-}
-
-void print_server_read_stats() {
-  uint64_t count = g_server_read_count.load();
-  uint64_t bytes = g_server_read_bytes.load();
-  uint64_t pread_us = g_server_pread_time_us.load();
-
-  std::cerr << "\n====== SERVER READ STATS ======\n";
-  std::cerr << "Read requests:      " << count << "\n";
-  std::cerr << "Total bytes:        " << (bytes / 1024 / 1024) << " MB\n";
-  std::cerr << "Avg request size:   " << (count > 0 ? bytes / count / 1024 : 0) << " KB\n";
-  std::cerr << "Total pread time:   " << (pread_us / 1000) << " ms\n";
-  std::cerr << "Avg pread latency:  " << (count > 0 ? pread_us / count : 0) << " us\n";
-  if (g_dummy_read_mode) {
-    std::cerr << "Mode:               DUMMY (no actual I/O)\n";
-  }
-  std::cerr << "================================\n\n";
-}
-// ============== END SERVER INSTRUMENTATION ==============
 
 // ============== SERVER-SIDE READ-AHEAD CACHE ==============
 // Cache recently read data on the server to reduce pread() syscalls
@@ -161,12 +121,7 @@ struct ServerReadCache {
     fh = file_handle;
     start_off = off;
 
-    auto t1 = std::chrono::high_resolution_clock::now();
     ssize_t res = ::pread(fh, buffer.data(), CACHE_SIZE, off);
-    auto t2 = std::chrono::high_resolution_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-    g_server_pread_time_us += us;
-
     valid_size = res > 0 ? static_cast<size_t>(res) : 0;
     return res;
   }
@@ -979,6 +934,14 @@ public:
       user_fh_sets[user].insert(fh);
     }
 
+    // Get file size for client prefetch decisions
+    struct stat st;
+    if (::fstat(fh, &st) == 0) {
+      response.setSize(st.st_size);
+    } else {
+      response.setSize(0);  // fallback: client will use prefetch
+    }
+
     OpenResponse::FuseFileInfo::Builder fi_response = response.initFi();
 
     fi_response.setCacheReaddir(fi.getCacheReaddir());
@@ -1033,15 +996,6 @@ public:
     size_t size = req.getSize();
     off_t off = req.getOff();
 
-    // INSTRUMENTATION
-    uint64_t count = ++g_server_read_count;
-    uint64_t total_bytes = (g_server_read_bytes += size);
-
-    // Print stats every ~500MB
-    if (count > 0 && (total_bytes / (500 * 1024 * 1024)) > ((total_bytes - size) / (500 * 1024 * 1024))) {
-      print_server_read_stats();
-    }
-
     Read::FuseFileInfo::Reader fi = req.getFi();
     int64_t fh = fi.getFh();
 
@@ -1058,23 +1012,16 @@ public:
     int err = 0;
     const char* data_ptr = nullptr;
 
-    if (g_dummy_read_mode) {
-      // Return pre-generated dummy data (no actual I/O)
-      size_t dummy_size = std::min(size, g_dummy_buffer.size());
-      data_ptr = g_dummy_buffer.data();
-      res = static_cast<ssize_t>(dummy_size);
+    // Direct pread - no server cache (client does prefetching)
+    thread_local std::vector<char> read_buffer;
+    if (read_buffer.size() < size) {
+      read_buffer.resize(size);
+    }
+    res = ::pread(fh, read_buffer.data(), size, off);
+    if (res < 0) {
+      err = errno;
     } else {
-      // Direct pread - no server cache (client does prefetching)
-      thread_local std::vector<char> read_buffer;
-      if (read_buffer.size() < size) {
-        read_buffer.resize(size);
-      }
-      res = ::pread(fh, read_buffer.data(), size, off);
-      if (res < 0) {
-        err = errno;
-      } else {
-        data_ptr = read_buffer.data();
-      }
+      data_ptr = read_buffer.data();
     }
 
     uint64_t bytesRead = res > 0 ? static_cast<uint64_t>(res) : 0;
@@ -1237,13 +1184,41 @@ public:
       return kj::READY_NOW;
     }  // END EXAMPLE
 
+    // Entry info including stat data for client caching
+    struct EntryInfo {
+      std::string name;
+      uint64_t ino;
+      uint32_t mode;
+      uint64_t size;
+      uint64_t mtime;
+      uint32_t mtime_nsec;
+    };
+
     // Single pass: collect entries into vector
-    std::vector<std::pair<std::string, uint64_t>> collected_entries;
+    std::vector<EntryInfo> collected_entries;
     collected_entries.reserve(64);  // Reasonable initial capacity
 
+    // Helper to add entry with stat info
+    auto add_entry = [&](const std::string& name, uint64_t entry_ino, const std::string& entry_path) {
+      struct stat st;
+      EntryInfo info{name, entry_ino, 0, 0, 0, 0};
+      if (::stat(entry_path.c_str(), &st) == 0) {
+        info.mode = st.st_mode;
+        info.size = st.st_size;
+        #ifdef __APPLE__
+        info.mtime = st.st_mtimespec.tv_sec;
+        info.mtime_nsec = st.st_mtimespec.tv_nsec;
+        #else
+        info.mtime = st.st_mtim.tv_sec;
+        info.mtime_nsec = st.st_mtim.tv_nsec;
+        #endif
+      }
+      collected_entries.push_back(info);
+    };
+
     // Add . and ..
-    collected_entries.emplace_back(".", ino);
-    collected_entries.emplace_back("..", get_parent_ino(ino, path));
+    add_entry(".", ino, path);
+    add_entry("..", get_parent_ino(ino, path), std::filesystem::path(path).parent_path());
 
     // Single directory iteration - collect all entries
     std::filesystem::directory_iterator iter(
@@ -1253,7 +1228,7 @@ public:
       std::string file_path = entry.path();
       std::string file_name = std::filesystem::path(file_path).filename();
       uint64_t file_ino = assign_inode(file_path);
-      collected_entries.emplace_back(file_name, file_ino);
+      add_entry(file_name, file_ino, file_path);
     }
 
     // Add soft mounts for root
@@ -1261,15 +1236,19 @@ public:
       for (auto const& [dest, source] : *get_user_mounts(user)) {
         std::string file_path = std::filesystem::path(root) / source;
         uint64_t file_ino = assign_inode(file_path);
-        collected_entries.emplace_back(dest, file_ino);
+        add_entry(dest, file_ino, file_path);
       }
     }
 
     // Build response from collected entries
     ::capnp::List<ReaddirResponse::Entry>::Builder entries = response.initEntries(collected_entries.size());
     for (size_t i = 0; i < collected_entries.size(); i++) {
-      entries[i].setName(collected_entries[i].first);
-      entries[i].setIno(collected_entries[i].second);
+      entries[i].setName(collected_entries[i].name);
+      entries[i].setIno(collected_entries[i].ino);
+      entries[i].setMode(collected_entries[i].mode);
+      entries[i].setSize(collected_entries[i].size);
+      entries[i].setMtime(collected_entries[i].mtime);
+      entries[i].setMtimeNsec(collected_entries[i].mtime_nsec);
     }
 
     response.setErrno(0);
@@ -1761,6 +1740,81 @@ public:
     return kj::READY_NOW;
   }
 
+  // Combined open+read for small file optimization
+  // Reduces 2 round-trips to 1
+  kj::Promise<void> openAndRead(OpenAndReadContext context) override {
+    auto params = context.getParams();
+    auto req = params.getReq();
+
+    auto results = context.getResults();
+    auto response = results.getRes();
+
+    uint64_t ino = req.getIno();
+    std::string path = get_path_from_ino(ino);
+
+    if (path.empty()) {
+      response.setErrno(ENOENT);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    bool access_ok = check_access(root, user, suffix, path);
+
+    if (!access_ok) {
+      response.setErrno(EACCES);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    std::string open_path = get_path_for_ino(ino);
+    if (open_path.empty()) {
+      response.setRes(-1);
+      response.setErrno(ENOENT);
+      return kj::READY_NOW;
+    }
+
+    // Open the file
+    OpenAndRead::FuseFileInfo::Reader fi = req.getFi();
+    int64_t fh = ::open(open_path.c_str(), fi.getFlags());
+
+    if (fh == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      return kj::READY_NOW;
+    }
+
+    // Track file handle
+    {
+      std::unique_lock lock(g_fh_mutex);
+      user_fh_sets[user].insert(fh);
+    }
+
+    response.setFh(fh);
+
+    // Read the data
+    size_t size = req.getSize();
+    off_t off = req.getOff();
+
+    kj::Array<kj::byte> buf = kj::heapArray<kj::byte>(size);
+    ssize_t bytes_read = ::pread(fh, buf.begin(), size, off);
+
+    if (bytes_read == -1) {
+      response.setErrno(errno);
+      response.setRes(-1);
+      // Still return the file handle so client can close it
+      return kj::READY_NOW;
+    }
+
+    // Return the data
+    kj::ArrayPtr<kj::byte> buf_ptr = kj::arrayPtr(buf.begin(), bytes_read);
+    capnp::Data::Reader buf_reader(buf_ptr);
+    response.setBuf(buf_reader);
+    response.setRes(bytes_read);
+    response.setErrno(0);
+
+    return kj::READY_NOW;
+  }
+
   // Any method which we don't implement will simply throw
   // an exception by default.
 };
@@ -1994,9 +2048,6 @@ std::string read_file(const std::string& path) {
 
 int start_rpc_server(std::string bind, int port, int auth_port, std::string root,
                      std::string suffix, std::string key_file, std::string cert_file) {
-  // INSTRUMENTATION: Initialize dummy read mode if GHOSTFS_DUMMY_READ=1
-  init_dummy_read_mode();
-
   if (root.length() > 0) {
     if (not std::filesystem::is_directory(root)) {
       std::error_code ec;

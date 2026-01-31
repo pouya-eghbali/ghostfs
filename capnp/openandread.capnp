@@ -1,11 +1,13 @@
-@0xec6e6ddddb23b53a;
+@0xd8f2a1b3c4e5f678;
 
-struct OpenResponse {
+# Combined open + read for small file optimization
+# Reduces 2 round-trips to 1 for small file reads
+
+struct OpenAndRead {
   ino   @0 :UInt64;
-  fi    @1 :FuseFileInfo;
-  res   @2 :Int8;
-  errno @3 :UInt64;
-  size  @4 :UInt64;   # file size for prefetch decision
+  size  @1 :UInt64;  # Max bytes to read
+  off   @2 :Int64;   # Read offset (usually 0)
+  fi    @3 :FuseFileInfo;
 
   struct FuseFileInfo {
     flags         @0  :Int64;

@@ -49,7 +49,7 @@ struct ReaddirResponse::Entry {
   class Pipeline;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(a8eef581a14f965a, 1, 1)
+    CAPNP_DECLARE_STRUCT_HEADER(a8eef581a14f965a, 4, 1)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -171,6 +171,14 @@ public:
 
   inline  ::uint64_t getIno() const;
 
+  inline  ::uint32_t getMode() const;
+
+  inline  ::uint64_t getSize() const;
+
+  inline  ::uint64_t getMtime() const;
+
+  inline  ::uint32_t getMtimeNsec() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -208,6 +216,18 @@ public:
 
   inline  ::uint64_t getIno();
   inline void setIno( ::uint64_t value);
+
+  inline  ::uint32_t getMode();
+  inline void setMode( ::uint32_t value);
+
+  inline  ::uint64_t getSize();
+  inline void setSize( ::uint64_t value);
+
+  inline  ::uint64_t getMtime();
+  inline void setMtime( ::uint64_t value);
+
+  inline  ::uint32_t getMtimeNsec();
+  inline void setMtimeNsec( ::uint32_t value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -345,6 +365,62 @@ inline  ::uint64_t ReaddirResponse::Entry::Builder::getIno() {
 inline void ReaddirResponse::Entry::Builder::setIno( ::uint64_t value) {
   _builder.setDataField< ::uint64_t>(
       ::capnp::bounded<0>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint32_t ReaddirResponse::Entry::Reader::getMode() const {
+  return _reader.getDataField< ::uint32_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint32_t ReaddirResponse::Entry::Builder::getMode() {
+  return _builder.getDataField< ::uint32_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void ReaddirResponse::Entry::Builder::setMode( ::uint32_t value) {
+  _builder.setDataField< ::uint32_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t ReaddirResponse::Entry::Reader::getSize() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t ReaddirResponse::Entry::Builder::getSize() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void ReaddirResponse::Entry::Builder::setSize( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t ReaddirResponse::Entry::Reader::getMtime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t ReaddirResponse::Entry::Builder::getMtime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void ReaddirResponse::Entry::Builder::setMtime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint32_t ReaddirResponse::Entry::Reader::getMtimeNsec() const {
+  return _reader.getDataField< ::uint32_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint32_t ReaddirResponse::Entry::Builder::getMtimeNsec() {
+  return _builder.getDataField< ::uint32_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void ReaddirResponse::Entry::Builder::setMtimeNsec( ::uint32_t value) {
+  _builder.setDataField< ::uint32_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
 }
 
 

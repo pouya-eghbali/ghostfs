@@ -46,6 +46,8 @@ using import "bulkread.capnp".BulkRead;
 using import "bulkread.response.capnp".BulkReadResponse;
 using import "bulkupload.capnp".BulkUpload;
 using import "bulkupload.response.capnp".BulkUploadResponse;
+using import "openandread.capnp".OpenAndRead;
+using import "openandread.response.capnp".OpenAndReadResponse;
 
 interface GhostFSAuthServer {
   authorize   @0 (user :Text, token :Text, retries :Int64, expires :UInt64) -> (token :Text);
@@ -86,4 +88,7 @@ interface GhostFS {
   copyFile   @21 (req :CopyFile)     -> (res :CopyFileResponse);
   bulkRead   @22 (req :BulkRead)     -> (res :BulkReadResponse);
   bulkUpload @23 (req :BulkUpload)   -> (res :BulkUploadResponse);
+
+  # Combined open+read for small file optimization (1 round-trip instead of 2)
+  openAndRead @24 (req :OpenAndRead) -> (res :OpenAndReadResponse);
 }
